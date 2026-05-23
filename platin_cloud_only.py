@@ -151,14 +151,16 @@ def hydrate_platin_credentials_from_disk(main_mod: Any) -> None:
     if not callable(orig_conn):
         return
     try:
+        jwt_existing = _direct_meta_get(sess, orig_conn, "ionos_jwt", "").strip()
+        if jwt_existing:
+            return
         pw_existing = (
             _direct_meta_get(sess, orig_conn, "cloud_backup_password", "")
             or _direct_meta_get(sess, orig_conn, "cloud_sync_password", "")
         ).strip()
-        if pw_existing:
-            return
+        em_existing = _direct_meta_get(sess, orig_conn, "portal_email", "").strip()
     except Exception:
-        pass
+        jwt_existing = pw_existing = em_existing = ""
     try:
         from skytycoon_extensions import _load_local_session
     except ImportError:
@@ -169,18 +171,18 @@ def hydrate_platin_credentials_from_disk(main_mod: Any) -> None:
     pw = str(data.get("password") or "").strip()
     em = str(data.get("portal_email") or "").strip().lower()
     tok = str(data.get("access_token") or "").strip()
-    if pw:
+    if pw and not pw_existing:
         try:
             _direct_meta_set(sess, orig_conn, "cloud_backup_password", pw)
             _direct_meta_set(sess, orig_conn, "cloud_sync_password", pw)
         except (OSError, sqlite3.Error):
             pass
-    if em and "@" in em:
+    if em and "@" in em and (not em_existing or "@" not in em_existing):
         try:
             _direct_meta_set(sess, orig_conn, "portal_email", em[:200])
         except (OSError, sqlite3.Error):
             pass
-    if tok:
+    if tok and not jwt_existing:
         try:
             _direct_meta_set(sess, orig_conn, "ionos_jwt", tok[:4096])
         except (OSError, sqlite3.Error):

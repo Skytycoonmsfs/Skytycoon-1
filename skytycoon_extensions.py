@@ -989,6 +989,40 @@ def _lock_six_main_hub_tabs(win: Any) -> None:
             tw.setTabEnabled(ix, False)
 
 
+def _resolve_portal_email_from_login(
+    pilot: str, login_json: dict[str, Any] | None
+) -> str:
+    """Was im Login-Feld steht (E-Mail) hat Vorrang vor alter Server-/Datei-E-Mail."""
+    p = (pilot or "").strip().lower()
+    if "@" in p:
+        return p[:200]
+    if not isinstance(login_json, dict):
+        return ""
+    em = str(
+        login_json.get("email") or login_json.get("portal_email") or ""
+    ).strip().lower()
+    return em[:200] if "@" in em else ""
+
+
+def _clear_stale_login_identity(main_mod: Any, db_path: Any) -> None:
+    """Vor frischem Login: vorheriges Konto aus Session-Meta entfernen."""
+    for key in (
+        "portal_email",
+        "career_bound_portal_email",
+        "ionos_jwt",
+        "platin_superadmin",
+        "alliance_snapshot_json",
+    ):
+        try:
+            main_mod.app_meta_set(db_path, key, "")
+        except Exception:
+            pass
+    try:
+        main_mod.cloud_password_set(db_path, "")
+    except Exception:
+        pass
+
+
 def _platin_seal_login_session(
     main_mod: Any,
     db_path: Any,
@@ -1016,9 +1050,10 @@ def _platin_seal_login_session(
     if pilot_n:
         main_mod.app_meta_set(db_path, "pilot_display_name", pilot_n[:120])
         main_mod.app_meta_set(db_path, "pilot_name", pilot_n[:120])
-    em = str(login_json.get("email") or login_json.get("portal_email") or pilot_n).strip().lower()
-    if em and "@" in em:
-        main_mod.app_meta_set(db_path, "portal_email", em[:200])
+    em = _resolve_portal_email_from_login(pilot_n, login_json)
+    if em:
+        main_mod.app_meta_set(db_path, "portal_email", em)
+        main_mod.app_meta_set(db_path, "career_bound_portal_email", em)
     main_mod.app_meta_set(db_path, "online_network_enabled", "1")
 
 
@@ -1332,9 +1367,7 @@ def _platin_persist_remember_me(
         except Exception:
             lk = ""
     if remember and pilot and pw:
-        em = str(
-            j.get("email") or j.get("portal_email") or pilot
-        ).strip().lower()
+        em = _resolve_portal_email_from_login(pilot, j)
         tok = str(
             j.get("access_token") or j.get("token") or ""
         ).strip()
@@ -1400,9 +1433,10 @@ def _platin_login_accept(
     except Exception:
         pass
     parent = getattr(dlg, "parent_window", None) or dlg.parent()
-    em_login = str(
-        payload.get("email") or payload.get("portal_email") or ""
-    ).strip().lower()
+    pilot_txt = ""
+    if getattr(dlg, "ed_login_name", None) is not None:
+        pilot_txt = dlg.ed_login_name.text().strip()
+    em_login = _resolve_portal_email_from_login(pilot_txt, payload)
     if em_login and "@" in em_login:
         try:
             prof_login = {
@@ -1658,7 +1692,7 @@ def _prefill_startup_auth_from_local_session(dlg: Any, main_mod: Any, db_path: A
     sess = _load_local_session(main_mod, db_path)
     if not sess:
         return False
-    user = str(sess.get("username") or sess.get("portal_email") or "").strip()
+    user = str(sess.get("portal_email") or sess.get("username") or "").strip()
     pw = str(sess.get("password") or "").strip()
     if user and getattr(dlg, "ed_login_name", None) is not None:
         dlg.ed_login_name.setText(user)
@@ -2203,6 +2237,7 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
         body = _desktop_auth_login_body(main_module, self._path, pilot, pw, key)
         parent_win = getattr(self, "parent_window", None) or self.parent()
         self._platin_fresh_login = True
+        _clear_stale_login_identity(main_module, self._path)
         try:
             r = requests.post(
                 f"{base}/api/v1/auth/login",
@@ -2267,9 +2302,12 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
                 main_module.app_meta_set(
                     self._path, "license_key_installed", lk_slot[:256]
                 )
-            em_slot = str(j.get("email") or pilot).strip().lower()
-            if em_slot and "@" in em_slot:
-                main_module.app_meta_set(self._path, "portal_email", em_slot[:200])
+            em_slot = _resolve_portal_email_from_login(pilot, j)
+            if em_slot:
+                main_module.app_meta_set(self._path, "portal_email", em_slot)
+                main_module.app_meta_set(
+                    self._path, "career_bound_portal_email", em_slot
+                )
             if pw:
                 main_module.cloud_password_set(self._path, pw)
             _bind_server_hardware_id(main_module, self._path, j, hid)
@@ -2307,9 +2345,12 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
             _platin_login_accept(self, main_module, self._path, j)
             return
         if st == "license_required":
-            em = str(j.get("email") or pilot).strip().lower()
-            if em and "@" in em:
-                main_module.app_meta_set(self._path, "portal_email", em[:200])
+            em = _resolve_portal_email_from_login(pilot, j)
+            if em:
+                main_module.app_meta_set(self._path, "portal_email", em)
+                main_module.app_meta_set(
+                    self._path, "career_bound_portal_email", em
+                )
             main_module.app_meta_set(self._path, "license_activated", "0")
             _bind_server_hardware_id(main_module, self._path, j, hid)
             if pw:
@@ -2332,9 +2373,12 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
             _bind_server_hardware_id(main_module, self._path, j, hid)
             if pw:
                 main_module.cloud_password_set(self._path, pw)
-            em = str(j.get("email") or pilot).strip().lower()
-            if em and "@" in em:
-                main_module.app_meta_set(self._path, "portal_email", em[:200])
+            em = _resolve_portal_email_from_login(pilot, j)
+            if em:
+                main_module.app_meta_set(self._path, "portal_email", em)
+                main_module.app_meta_set(
+                    self._path, "career_bound_portal_email", em
+                )
             try:
                 credits_v = float(j.get("credits", 0))
                 xp_v = float(j.get("xp", 0))
@@ -2392,9 +2436,12 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
                 main_module.app_meta_set(
                     self._path, "license_key_installed", lk_ok[:256]
                 )
-            em_ok = str(j.get("email") or pilot).strip().lower()
-            if em_ok and "@" in em_ok:
-                main_module.app_meta_set(self._path, "portal_email", em_ok[:200])
+            em_ok = _resolve_portal_email_from_login(pilot, j)
+            if em_ok:
+                main_module.app_meta_set(self._path, "portal_email", em_ok)
+                main_module.app_meta_set(
+                    self._path, "career_bound_portal_email", em_ok
+                )
             if pw:
                 main_module.cloud_password_set(self._path, pw)
             _bind_server_hardware_id(main_module, self._path, j, hid)
