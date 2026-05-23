@@ -1,0 +1,3 @@
+        self.job_board_tabs.currentChanged.connect(self._on_job_board_tab_changed)
+        job_root.addWidget(self.job_board_tabs)
+        self._stack_job_board = QStackedWidget()

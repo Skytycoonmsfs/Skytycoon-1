@@ -1,0 +1,30 @@
+[ ] OFT BESPROCHENE, ABER IM CODE FEHLENDE FEATURES:
+
+- SimConnect AICreateNonATCAircraft: Keine produktive „physische Injektion“ von Mitarbeiter-/NPC-Flugzeugen in den MSFS-Prozess gefunden; Flugzeug-Spawns und KI bleiben auf Demo-/Overlay-Ebene ohne echte SimConnect-Spawn-API-Anbindung.
+- Atomare Server-Kauf-Sperre (Auktionshaus / P2P): Lokale Broker-Datei und Reservierungs-Timer; kein serverseitiger transaktionaler Lock über IONOS-SQLite, der Race-Conditions bei parallelen Käufern vollständig ausschließt.
+- Automatisches Passwort-Reset im Admin Commander: Kein Endpunkt oder UI-Flow, der einem Nutzer ein neues Cloud-Passwort sicher zuweist und gleichzeitig die Client-meta synchronisiert (nur manuelle Admin-Felder / Backups).
+- Asynchrones Crash-Reporting an IONOS: Mit Meilenstein 145 ist POST /api/v1/admin/reports/crash + clientseitiger Thread-Reporter ergänzt; Admin_Commander liest weiterhin primär die lokale admin_actions.log — ein Live-Pull der Server-log-Datei in die Admin-UI ist nicht implementiert (Server schreibt eigene admin_actions.log unter APP_ROOT).
+
+[/] HALBFERTIGE ODER EINGESCHRÄNKTE IMPLEMENTIERUNGEN:
+
+- Live-Seat-Map / PAX-Sync während GSX Boarding State 4: Kabine und Grid werden aus Job-Snapshots gebaut; keine harte Kopplung an GSX-State-4-Livedaten der einzelnen Sitze in Echtzeit.
+- TOGA-Schub-Verschleiß nach Landung: FLEX/TOGA-Profil wird in app_meta gesetzt; der dokumentierte „harte“ Verschleißpfad nach Landung ist nur teilweise mit generellem Triebwerks-Tick verknüpft, nicht als separates Landungs-Engine-Audit.
+- Automatische Crew-Kündigung bei niedrigem Happiness: HR-Daten pflegen satisfaction_pct; ein deterministischer Auto-Fire-Trigger bei Schwellenwerten fehlt oder ist nicht durchgängig an Finanz-/Log-Events gebunden.
+- Zero-Freeze / QNetworkAccessManager: Viele Pfade nutzen weiterhin synchrones requests / schwere Arbeit im GUI-Thread (z. B. Cloud-Backup-Upload-Thread ist da, aber nicht alle Netzwerkpfade auf QNAM umgestellt).
+- SimConnect-Poll-Schleife: Läuft im Kontext der bestehenden Architektur; vollständige Isolation in einem dedizierten QThread für alle SimConnect-Lesevorgänge ist nicht als „fertig“ zu bezeichnen, wenn das Ziel „nie GUI blockieren“ lautet.
+
+🇩🇪 HARTCODIERTE TEXTE (i18n-Lücken) — Hinweis:
+
+Eine vollständige zeilenweise Liste aller hartkodierten UI-Strings in main.py würde mehrere Tausend Zeilen umfassen und veraltet nach jedem Edit. Stattdessen: Es existieren weiterhin viele direkte f-Strings und QMessageBox-/Label-Texte (z. B. Flug-abschlossen-Dialog, Tech-Log, GSX-/Ermüdungszeilen, Bruchlandungs-Logs, job-Detail-Zusätze) ohne self._tr()/i18n_db. Empfohlenes Vorgehen: gezieltes Ruffen mit rg \"setText\\(f\\\"|QMessageBox\\.|_append_log\\(\\\"|_append_log\\(f\" auf main.py und schrittweise Ersetzung.
+
+🚨 LOGIK-FEHLER UND SYNCHRONISATIONS-BUGS:
+
+- Flüchtige RAM-Zustände: SimConnect-Cache, GSX-Zwischenzustände, aktive Job-Dicts im Speicher; ohne explizites persistiertes Event können sie von der career.db abweichen, bis ein Flug finalisiert oder Meta geschrieben wird.
+- Logo beim ersten Aufruf: Qt braucht ein gerendertes Fenster; Logos hängen an Timing (Wizard → MorningReport → show). Mit doppelten QTimer.singleShot(800, …) nach Morgenbericht und nach show() soll die Stabilität steigen; bei fehlender PNG (ICAO-Dateiname) bleibt nur Fallback „✈“.
+- Subventions-Jobs: Flag subsidized_dest basiert auf generiertem Ziel-ICAO; alte gespeicherte Jobs ohne Flag erhalten den UI-Hinweis erst nach Neu-Generierung der Liste.
+
+Nächste sinnvolle Schritte (Priorität):
+
+1. Admin_Commander: optional SKYTYCOON_IONOS_API_BASE + GET-Tail der Server-admin_actions.log oder gemeinsames Log-Volume.
+2. i18n-Sweep für verbleibende QMessageBox-/Flugabschluss-Blöcke.
+3. QNetworkAccessManager-Migration für alle verbleibenden requests.*-Hotpaths im GUI-Thread.

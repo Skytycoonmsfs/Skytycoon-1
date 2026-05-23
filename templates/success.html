@@ -1,0 +1,8 @@
+{% extends "base.html" %}{% block title %}{{ t.ok_title }}{% endblock %}
+{% block body %}
+<div class="form" style="text-align:center;border-color:#2e7d32;">
+<h2 style="color:#81c784;">{{ t.ok_h2 }}</h2>
+<p>{{ success_msg }}</p>
+<div class="success-key">{{ key }}</div>
+<p style="font-size:13px;color:var(--muted);">{{ t.ok_hint }}</p>
+<a href="/login">{{ t.ok_link }}</a></div>{% endblock %}

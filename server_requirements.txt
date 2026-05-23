@@ -1,0 +1,14 @@
+# SkyTycoon Pro – Server (FastAPI + Web + JWT optional)
+# Installation auf dem IONOS-Host: pip install -r server_requirements.txt
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+jinja2>=3.1.3
+python-multipart>=0.0.9
+passlib[bcrypt]>=1.7.4
+# passlib 1.7.x ist mit bcrypt>=4.1 nicht kompatibel (ValueError beim ersten Hash → 500 bei Registrierung).
+bcrypt>=4.0.1,<4.1
+python-jose[cryptography]>=3.3.0
+pydantic>=2.6.0
+requests>=2.31.0
+psycopg2-binary>=2.9.9
+deep-translator>=1.11.4

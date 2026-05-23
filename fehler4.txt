@@ -1,0 +1,70 @@
+================================================================================
+FEHLER4 — Abschnitt D abgearbeitet + Server + EXE (Vollscan)
+================================================================================
+Stand: 2026-05-20 | PLATIN_BUILD: 20260520-fehler4-v8
+
+================================================================================
+D. OFFENE PUNKTE — STATUS NACH FIX
+================================================================================
+
+[OK] login_widget-Ersatz (ohne main.py-Layout)
+     -> win.login_widget = _PlatinLoginOverlay (Vollbild nach Logout)
+     -> StartupAuthDialog als Kind des Overlays
+     Datei: skytycoon_extensions.py
+
+[OK] Patrick.S Login / Triple-Slot
+     -> POST /api/v1/auth/login: Portal-Repair VOR HWID-403
+     -> POST /api/v1/profile/cloud_sync: Repair bereits zuerst
+     -> conn.commit() in _provision_hwid_slot_license / repair
+     Datei: server_backend.py | Deploy: aktiv
+
+[OK] Menschen-Stimmen WAV / CDN
+     -> download_cabin_sounds.py laedt von skytycoon.info
+     -> 56 WAV unter assets/sounds/ (CDN + Mirror)
+     -> QSoundEffect Forward-Slash, 75% Slider (Extensions)
+
+[OK] PyInstaller EXE
+     -> main.spec: hiddenimports fuer alle Platin-Module
+     -> Build: dist\main.exe (PyInstaller 6.19.0, erfolgreich)
+
+[FROZEN/HINWEIS] EFB-Tab / Bank umbenennen
+     -> EFB = separates EfbTabletDialog (kein Haupt-Hub-Tab) — nicht entfernbar ohne main.py
+     -> Hub „Bank“: Tab-Titel per Extensions auf „🏦 Bank“ umbenannt [OK]
+     -> Unter-Tabs: Bank & Kredite / Kerosin-Trading [OK]
+
+================================================================================
+E. SERVER IONOS (erneut deployed)
+================================================================================
+
+skytycoon.service              [active]
+skytycoon-discord-bot.service  [active]
+server_backend.py              [live — auth/login + cloud_sync Repair]
+skytycoon_extensions.py        [live — v8 Login-Overlay]
+
+================================================================================
+F. NAECHSTE SCHRITTE FUER PILOT (manueller Test)
+================================================================================
+
+1. Alte SkyTycoon-Instanz beenden (auch dist\main.exe falls alt)
+2. cd "c:\Users\schmi\Desktop\Neuer Ordner (2)"
+3. Entweder:  python main.py
+   Oder neu:  dist\main.exe
+4. Logout -> goldener Vollbild-Login -> Patrick.S einloggen
+5. Passagier-Feedback-Tab -> Ansage (kein Windows-Ping)
+
+================================================================================
+G. ZUSAMMENFASSUNG
+================================================================================
+
+fehler3 Abschnitt D:     [ABGEARBEITET]
+Technische offene Module:  [0 — alle 3 .py vorhanden]
+PC-Verifikation:         [vom Pilot nach Schritt F]
+main.py Layout:          [UNBERUEHRT — nur Import Z.10 + Trigger Z.11996]
+
+Dateien dieses Laufes:
+  skytycoon_extensions.py (Login-Overlay, Bank-Labels, v8)
+  server_backend.py (auth/login Repair-first)
+  main.spec (hiddenimports)
+  dist\main.exe (neu gebaut)
+
+Ende fehler4.txt

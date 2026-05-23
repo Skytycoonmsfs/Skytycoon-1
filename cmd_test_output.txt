@@ -1,0 +1,5 @@
+ReTURN 1
+--- STDOUT ---
+
+--- STDERR ---
+Die Syntax fr den Dateinamen, Verzeichnisnamen oder die Datentr„gerbezeichnung ist falsch.

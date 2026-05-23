@@ -1,0 +1,385 @@
+{% extends "base.html" %}{% block title %}{{ t.idx_title }}{% endblock %}
+{% block body %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+{% if site_news_message %}
+<section style="background:linear-gradient(135deg,#1a1508,#2d2208);border-bottom:3px solid #d4af37;padding:16px 20px;text-align:center;">
+  <p style="margin:0;color:#ffd54f;font-weight:800;font-size:15px;letter-spacing:.04em;">📢 {% if lang == 'de' %}Live News{% else %}Live News{% endif %}</p>
+  <p style="margin:10px 0 0;color:#eceff1;line-height:1.55;max-width:900px;margin-left:auto;margin-right:auto;">{{ site_news_message|e }}</p>
+</section>
+{% endif %}
+<section class="hero">
+  <div class="badge">{{ t.idx_badge }}</div>
+  <h2>{{ t.idx_hero_title }}</h2>
+  <p>{{ t.idx_hero_sub }}</p>
+  <div class="cta-row">
+    <a class="btn" href="/login">{{ t.idx_cta_portal }}</a>
+    <a class="btn btn-secondary" href="/register" target="_blank" rel="noopener">{{ t.idx_cta_account }}</a>
+  </div>
+  <div class="price-tag" style="margin:14px 0 0;font-size:1.05rem;color:#eceff1;">
+    {% if lang == 'de' %}
+    <strong>SkyTycoon Pro</strong> · Lifetime-Lizenz: <span style="color:#d4af37;font-weight:bold;">{{ current_shop_price }} €</span>
+    {% else %}
+    <strong>SkyTycoon Pro</strong> · lifetime license: <span style="color:#d4af37;font-weight:bold;">€ {{ current_shop_price }}</span>
+    {% endif %}
+  </div>
+  <div class="trust-strip">
+    <span>✓ {{ t.idx_trust1 }}</span>
+    <span>✓ {{ t.idx_trust2 }}</span>
+    <span>✓ {{ t.idx_trust3 }}</span>
+  </div>
+</section>
+
+<section style="background:#05070a;color:#e3e7ed;border-top:3px solid #d4af37;padding:48px 16px 40px;">
+  <div style="max-width:1120px;margin:0 auto;">
+    <div style="text-align:center;margin-bottom:28px;">
+      <h2 style="color:#d4af37;font-weight:800;letter-spacing:.08em;margin:0 0 10px;font-size:clamp(1.1rem,3vw,1.65rem);">✈️ {{ t.idx_ops_title }}</h2>
+      <p style="color:#90a4ae;margin:0 0 14px;font-size:15px;">{{ t.idx_ops_sub }}</p>
+      <div style="display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:6px;background:#12161f;border:1px solid #2a3545;">
+        <span class="radar-pulse" aria-hidden="true"></span>
+        <span id="live_pilot_counter" style="font-family:Consolas,monospace;color:#00ff66;font-weight:bold;font-size:13px;">{{ t.idx_pilots_online.replace('{n}', '0') }}</span>
+      </div>
+    </div>
+    <div id="live_global_web_radar" style="height:min(550px,58vh);width:100%;border-radius:8px 8px 0 0;border:2px solid #1a2332;border-bottom:none;box-shadow:0 10px 30px rgba(0,0,0,.5);z-index:1;"></div>
+    <div style="background:#12161f;border:2px solid #1a2332;border-radius:0 0 8px 8px;padding:12px 14px;box-shadow:0 15px 35px rgba(0,0,0,.6);overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-family:Consolas,monospace;font-size:14px;margin:0;">
+        <thead>
+          <tr style="color:#d4af37;background:#0b0f19;font-size:13px;border-bottom:2px solid #d4af37;">
+            <th style="padding:10px 8px;text-align:left;">{{ t.idx_fids_col_pilot }}</th>
+            <th style="padding:10px 8px;text-align:left;">{{ t.idx_fids_col_aircraft }}</th>
+            <th style="padding:10px 8px;text-align:left;">{{ t.idx_fids_col_icao }}</th>
+            <th style="padding:10px 8px;text-align:left;">{{ t.idx_fids_col_phase }}</th>
+            <th style="padding:10px 8px;text-align:left;">{{ t.idx_fids_col_alt }}</th>
+            <th style="padding:10px 8px;text-align:left;">{{ t.idx_fids_col_speed }}</th>
+            <th style="padding:10px 8px;text-align:left;">{{ t.idx_fids_col_locate }}</th>
+          </tr>
+        </thead>
+        <tbody id="public_web_fids_tbody">
+          <tr><td colspan="7" style="text-align:center;color:#78909c;padding:20px;">{{ t.idx_fids_loading }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div style="text-align:center;margin-top:28px;padding:20px;border-radius:8px;background:linear-gradient(135deg,#12161f 0%,#0b0f19 100%);border:1px solid #2a3545;">
+      <h3 style="color:#fff;font-weight:700;margin:0 0 8px;">{{ t.idx_ops_cta_title }}</h3>
+      <p style="color:#90a4ae;font-size:14px;margin:0 0 14px;">{{ t.idx_ops_cta_sub }}</p>
+      <a href="/register" target="_blank" rel="noopener" style="display:inline-block;background:#d4af37;color:#000;font-weight:700;padding:12px 28px;border-radius:4px;text-decoration:none;box-shadow:0 4px 15px rgba(212,175,55,.3);">🚀 {{ t.idx_ops_cta_btn }}</a>
+    </div>
+  </div>
+</section>
+
+<section style="background:#0c0e12;padding:40px 16px;border-top:1px solid #1a2332;">
+  <div style="max-width:1120px;margin:0 auto;">
+    <h2 style="text-align:center;color:#d4af37;font-weight:800;margin:0 0 28px;">🏆 {{ t.idx_lb_title }}</h2>
+    <div id="idx_leaderboard_podium" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;">
+      <p style="grid-column:1/-1;text-align:center;color:#78909c;">{{ t.idx_lb_empty }}</p>
+    </div>
+  </div>
+</section>
+
+<section style="background:#12161f;padding:36px 16px;border-top:1px solid #2a3545;">
+  <div style="max-width:640px;margin:0 auto;text-align:center;">
+    <h2 style="color:#fff;font-weight:700;margin:0 0 20px;">📊 {{ t.idx_profit_title }}</h2>
+    <label style="display:block;text-align:left;color:#90a4ae;font-size:13px;margin-bottom:6px;">{{ t.idx_profit_aircraft }}</label>
+    <select id="profit_aircraft_select" style="width:100%;padding:10px;margin-bottom:16px;background:#0b0f19;color:#e3e7ed;border:1px solid #2a3545;border-radius:6px;">
+      <option value="1.0">{{ t.idx_profit_plane_a320 }}</option>
+      <option value="1.15">{{ t.idx_profit_plane_737 }}</option>
+      <option value="1.35">{{ t.idx_profit_plane_a340 }}</option>
+    </select>
+    <label style="display:block;text-align:left;color:#90a4ae;font-size:13px;margin-bottom:6px;">{{ t.idx_profit_distance }}: <span id="profit_nm_label">1500</span> NM</label>
+    <input type="range" id="profit_nm_slider" min="100" max="4000" value="1500" step="50" style="width:100%;accent-color:#d4af37;margin-bottom:20px;">
+    <div style="display:flex;justify-content:center;gap:32px;flex-wrap:wrap;">
+      <div>
+        <div style="color:#90a4ae;font-size:12px;">{{ t.idx_profit_credits }}</div>
+        <div id="profit_credits_out" style="font-size:2rem;font-weight:800;color:#00ff66;font-family:Consolas,monospace;">0</div>
+      </div>
+      <div>
+        <div style="color:#90a4ae;font-size:12px;">{{ t.idx_profit_xp }}</div>
+        <div id="profit_xp_out" style="font-size:2rem;font-weight:800;color:#33ccff;font-family:Consolas,monospace;">0</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section style="max-width:1120px;margin:0 auto;padding:24px 20px;">
+  <p style="font-size:12px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:#546e7a;margin:0 0 10px;">{{ t.idx_ticker_title }}</p>
+  <div id="market-ticker" style="background:var(--panel);border:1px solid #1e2836;border-radius:12px;padding:14px 18px;min-height:52px;overflow:hidden;">
+    {% if ticker_items and ticker_items|length > 0 %}
+    <div class="ticker-track" style="display:flex;flex-wrap:wrap;gap:12px 24px;font-size:14px;color:#cfd8dc;">
+      {% for it in ticker_items %}
+      <span><strong style="color:#64b5f6;">{{ it.model|e }}</strong> · {{ "%.0f"|format(it.condition_pct) }}% · {{ "%.0f"|format(it.price_credits) }} CR{% if it.lock_until and it.lock_until > now_ts %} · Auktion · {{ (it.lock_until - now_ts)|int }}s{% endif %}
+      </span>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p style="margin:0;color:var(--muted);font-size:14px;">{{ t.idx_ticker_empty }}</p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="st-platin-matrix" style="max-width:1120px;margin:0 auto;padding:32px 20px 24px;">
+  <h2 style="text-align:center;color:#d4af37;font-weight:900;letter-spacing:.1em;margin:0 0 8px;font-size:clamp(1.15rem,3vw,1.75rem);">
+    {% if lang == 'de' %}🏆 Platin-Feature-Matrix{% else %}🏆 Platinum Feature Matrix{% endif %}
+  </h2>
+  <p style="text-align:center;color:#90a4ae;font-size:14px;margin:0 0 28px;max-width:720px;margin-left:auto;margin-right:auto;">
+    {% if lang == 'de' %}Das #1 MSFS Tool — Souveräne Cloud, GSX, Kabinen-Live &amp; Routen-Engine in einem Paket.{% else %}The #1 MSFS tool — sovereign cloud, GSX, cabin live &amp; route engine in one suite.{% endif %}
+  </p>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px;">
+    <article class="st-gold-tile" style="background:linear-gradient(145deg,#0a0806,#14100a);border:2px solid #d4af37;border-radius:14px;padding:22px 18px;box-shadow:0 8px 32px rgba(212,175,55,.15);">
+      <h3 style="margin:0 0 10px;color:#ffd54f;font-size:1.05rem;font-weight:800;">☁️ Sovereign Cloud Sync</h3>
+      <p style="margin:0;color:#b0bec5;font-size:13px;line-height:1.55;">{% if lang == 'de' %}IONOS-PostgreSQL · HWID-Triple-Slot · Flotten- &amp; Credit-Persistenz ohne Datenverlust.{% else %}IONOS PostgreSQL · HWID triple-slot · fleet &amp; credit persistence without data loss.{% endif %}</p>
+    </article>
+    <article class="st-gold-tile" style="background:linear-gradient(145deg,#0a0806,#14100a);border:2px solid #d4af37;border-radius:14px;padding:22px 18px;box-shadow:0 8px 32px rgba(212,175,55,.15);">
+      <h3 style="margin:0 0 10px;color:#ffd54f;font-size:1.05rem;font-weight:800;">🛫 GSX Remote Control</h3>
+      <p style="margin:0;color:#b0bec5;font-size:13px;line-height:1.55;">{% if lang == 'de' %}SimConnect-Handshake · Catering &amp; Boarding automatisch bei Passagier/VIP-Charter.{% else %}SimConnect handshake · auto catering &amp; boarding on passenger/VIP charter.{% endif %}</p>
+    </article>
+    <article class="st-gold-tile" style="background:linear-gradient(145deg,#0a0806,#14100a);border:2px solid #d4af37;border-radius:14px;padding:22px 18px;box-shadow:0 8px 32px rgba(212,175,55,.15);">
+      <h3 style="margin:0 0 10px;color:#ffd54f;font-size:1.05rem;font-weight:800;">🎙️ 48-Stimmen Cabin Live</h3>
+      <p style="margin:0;color:#b0bec5;font-size:13px;line-height:1.55;">{% if lang == 'de' %}DE/EN Stewardess-Durchsagen · Lautstärke-Mischpult · CDN-Mirror auf SSD.{% else %}DE/EN PA announcements · volume mixer · CDN mirror to local SSD.{% endif %}</p>
+    </article>
+    <article class="st-gold-tile" style="background:linear-gradient(145deg,#0a0806,#14100a);border:2px solid #d4af37;border-radius:14px;padding:22px 18px;box-shadow:0 8px 32px rgba(212,175,55,.15);">
+      <h3 style="margin:0 0 10px;color:#ffd54f;font-size:1.05rem;font-weight:800;">🗺️ Custom Route Engine</h3>
+      <p style="margin:0;color:#b0bec5;font-size:13px;line-height:1.55;">{% if lang == 'de' %}Charter-Routen · SimBrief · <strong style="color:#00e676;">+15&nbsp;% Platin-Bonus</strong> auf Economy-Rewards.{% else %}Charter routes · SimBrief · <strong style="color:#00e676;">+15% platinum bonus</strong> on economy rewards.{% endif %}</p>
+    </article>
+  </div>
+</section>
+
+<section class="st-google-reviews" style="max-width:1120px;margin:0 auto;padding:8px 20px 36px;">
+  <div style="background:linear-gradient(135deg,#12161f,#0b0f19);border:2px solid #d4af37;border-radius:16px;padding:28px 24px;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.45);">
+    <p style="margin:0 0 6px;font-size:28px;letter-spacing:.08em;color:#ffd54f;" aria-hidden="true">★★★★★</p>
+    <p id="st_google_rating_line" style="margin:0 0 14px;color:#eceff1;font-weight:700;font-size:15px;">
+      {% if lang == 'de' %}SkyTycoon Pro · MSFS Tool · 5,0 / 5 Piloten-Bewertung{% else %}SkyTycoon Pro · MSFS tool · 5.0 / 5 pilot rating{% endif %}
+    </p>
+    <p style="margin:0 0 18px;color:#90a4ae;font-size:13px;max-width:640px;margin-left:auto;margin-right:auto;line-height:1.55;">
+      {% if lang == 'de' %}Echte Community-Sterne — lesbar für Google Search (Schema.org).{% else %}Real community stars — readable for Google Search (Schema.org).{% endif %}
+    </p>
+    <a href="https://g.page/r/SkyTycoonPro/review" target="_blank" rel="noopener noreferrer" class="btn" style="width:auto;display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#d4af37,#b8860b);color:#000;border:none;">
+      {% if lang == 'de' %}🌟 Auf Google bewerten{% else %}🌟 Rate on Google{% endif %}
+    </a>
+    <a href="/reviews" style="display:inline-block;margin-left:14px;color:#64b5f6;font-size:14px;">{% if lang == 'de' %}Alle Reviews{% else %}All reviews{% endif %}</a>
+  </div>
+</section>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "SkyTycoon Pro",
+  "applicationCategory": "GameApplication",
+  "operatingSystem": "Windows",
+  "description": "MSFS Tool — Airline career economy addon for Microsoft Flight Simulator",
+  "url": "https://skytycoon.info/",
+  "offers": { "@type": "Offer", "price": "{{ current_shop_price }}", "priceCurrency": "EUR" },
+  "aggregateRating": {
+    "@type": "AggregateRating",
+    "ratingValue": "5",
+    "ratingCount": "1",
+    "bestRating": "5",
+    "worstRating": "1"
+  }
+}
+</script>
+<script>
+(function(){
+  fetch('/reviews', { credentials: 'same-origin' })
+    .then(function(){ return null; })
+    .catch(function(){});
+})();
+</script>
+<div style="text-align:center;padding-bottom:72px;">
+  <a class="btn" href="/login" style="width:auto;display:inline-block;padding:14px 32px;">{{ t.idx_cta_portal }}</a>
+</div>
+
+<div id="div_live_activity_ticker" class="idx-activity-ticker" aria-live="polite">
+  <div class="idx-activity-track" id="idx_activity_track">
+    <span class="idx-activity-item">{{ t.idx_ticker_live_empty }}</span>
+  </div>
+</div>
+
+<style>
+.radar-pulse{width:10px;height:10px;background:#00ff66;border-radius:50%;box-shadow:0 0 0 0 rgba(0,255,102,.7);animation:st-radar-pulse 1.6s infinite}
+@keyframes st-radar-pulse{0%{transform:scale(.95);box-shadow:0 0 0 0 rgba(0,255,102,.7)}70%{transform:scale(1);box-shadow:0 0 0 8px rgba(0,255,102,0)}100%{transform:scale(.95);box-shadow:0 0 0 0 rgba(0,255,102,0)}}
+.fids-row-highlight{background:rgba(212,175,55,.15)!important;border-left:4px solid #d4af37!important;transition:background-color .3s}
+.st-plane-icon{background:transparent;border:none}
+.idx-lb-card{padding:20px 16px;border-radius:10px;text-align:center;border:1px solid #2a3545;background:#12161f}
+.idx-lb-gold{border-color:#d4af37;box-shadow:0 0 24px rgba(212,175,55,.25)}
+.idx-lb-silver{border-color:#c0c0c0}
+.idx-lb-bronze{border-color:#cd7f32}
+.idx-activity-ticker{position:fixed;bottom:0;left:0;right:0;z-index:900;background:#0a1628;border-top:1px solid #1e3a5f;height:36px;overflow:hidden}
+.idx-activity-track{display:flex;white-space:nowrap;animation:idx-marquee 45s linear infinite;width:max-content}
+.idx-activity-item{padding:0 40px;line-height:36px;font-size:13px;color:#b0bec5;font-family:Consolas,monospace}
+@keyframes idx-marquee{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+body{padding-bottom:40px}
+</style>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+(function(){
+  var ST_PILOTS_ONLINE = {{ t.idx_pilots_online|tojson }};
+  var ST_FIDS_EMPTY = {{ t.idx_fids_empty|tojson }};
+  var ST_LOCATE = {{ t.idx_fids_locate_btn|tojson }};
+  var ST_LB_RANK = [{{ t.idx_lb_rank_gold|tojson }}, {{ t.idx_lb_rank_silver|tojson }}, {{ t.idx_lb_rank_bronze|tojson }}];
+  var ST_LB_CEO = {{ t.idx_lb_ceo|tojson }};
+  var ST_LB_MEMBERS = {{ t.idx_lb_members|tojson }};
+  var ST_LB_CREDITS = {{ t.idx_lb_credits|tojson }};
+  var ST_LB_EMPTY = {{ t.idx_lb_empty|tojson }};
+
+  var map = L.map('live_global_web_radar', { zoomControl: true }).setView([46.8, 8.2], 4);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap &copy; CARTO', subdomains: 'abcd', maxZoom: 20
+  }).addTo(map);
+
+  var activeAircraftMarkers = {};
+
+  function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+  function rowId(hw){ return 'fids_row_' + String(hw||'').replace(/[^a-zA-Z0-9]/g,''); }
+
+  function syncRadarAndFidsCenter(){
+    fetch('/api/v1/web/radar/positions')
+      .then(function(res){ return res.json(); })
+      .then(function(data){
+        var tbody = document.getElementById('public_web_fids_tbody');
+        var counter = document.getElementById('live_pilot_counter');
+        if (!tbody) return;
+        var pilots = (data && data.status === 'success' && data.pilots) ? data.pilots : [];
+        if (counter) counter.textContent = ST_PILOTS_ONLINE.replace('{n}', String(pilots.length));
+        if (!pilots.length){
+          tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#78909c;padding:20px;">'+esc(ST_FIDS_EMPTY)+'</td></tr>';
+          Object.keys(activeAircraftMarkers).forEach(function(id){
+            map.removeLayer(activeAircraftMarkers[id]); delete activeAircraftMarkers[id];
+          });
+          return;
+        }
+        tbody.innerHTML = '';
+        var currentPings = {};
+        pilots.forEach(function(pilot){
+          var hw = pilot.hardware_id || pilot.id || '';
+          if (!hw) return;
+          currentPings[hw] = true;
+          var lat = Number(pilot.lat != null ? pilot.lat : pilot.latitude);
+          var lng = Number(pilot.lng != null ? pilot.lng : pilot.lon);
+          if (isNaN(lat) || isNaN(lng)) return;
+          var phase = String(pilot.flight_phase || 'unknown');
+          var phaseColor = '#ffcc00';
+          if (phase === 'Reiseflug' || phase === 'Endanflug' || phase === 'Cruise') phaseColor = '#00ff66';
+          if (phase === 'Geparkt' || phase === 'Boarding' || phase === 'Parked') phaseColor = '#ffaa00';
+          var gs = Number(pilot.ground_speed || 0);
+          var speedTxt = gs > 0 ? (gs + ' kt') : (Number(pilot.heading || 0) + '°');
+          var rid = rowId(hw);
+          var tr = document.createElement('tr');
+          tr.id = rid;
+          tr.style.verticalAlign = 'middle';
+          tr.innerHTML =
+            '<td style="color:#0088ff;font-weight:bold;padding:10px 8px;">👤 '+esc(pilot.pilot_name)+'</td>'+
+            '<td style="padding:10px 8px;"><span style="background:#37474f;padding:2px 8px;border-radius:4px;font-size:11px;">'+esc(pilot.aircraft_model)+'</span></td>'+
+            '<td style="color:#d4af37;font-weight:bold;padding:10px 8px;">🟢 '+esc(pilot.current_icao)+'</td>'+
+            '<td style="padding:10px 8px;"><span style="color:'+phaseColor+';font-weight:bold;">'+esc(phase.toUpperCase())+'</span></td>'+
+            '<td style="color:#33ccff;font-weight:bold;padding:10px 8px;">'+Number(pilot.altitude||0).toLocaleString()+' ft</td>'+
+            '<td style="color:#aaa;padding:10px 8px;">'+esc(speedTxt)+'</td>'+
+            '<td style="padding:10px 8px;"><button type="button" class="btn-locate" data-hw="'+esc(hw)+'" data-lat="'+lat+'" data-lng="'+lng+'" style="font-size:11px;font-weight:bold;padding:2px 8px;border:1px solid #d4af37;background:transparent;color:#d4af37;border-radius:4px;cursor:pointer;">🗺️ '+esc(ST_LOCATE)+'</button></td>';
+          tbody.appendChild(tr);
+          var popup = '<div style="min-width:180px;font-family:monospace;color:#fff;"><strong style="color:#d4af37;">✈ '+esc(pilot.pilot_name)+'</strong><br/>'+esc(pilot.aircraft_model)+'<br/><span style="color:#33ccff;">'+Number(pilot.altitude||0).toLocaleString()+' ft</span> · <span style="color:'+phaseColor+'">'+esc(phase.toUpperCase())+'</span></div>';
+          var icon = L.divIcon({
+            className: 'st-plane-icon',
+            html: '<div style="transform:rotate('+(Number(pilot.heading)||0)+'deg);font-size:26px;color:#d4af37;cursor:pointer;text-shadow:0 0 5px #000;">✈</div>',
+            iconSize: [28, 28], iconAnchor: [14, 14]
+          });
+          if (activeAircraftMarkers[hw]){
+            activeAircraftMarkers[hw].setLatLng([lat, lng]);
+            activeAircraftMarkers[hw].setIcon(icon);
+            activeAircraftMarkers[hw].getPopup().setContent(popup);
+          } else {
+            var marker = L.marker([lat, lng], { icon: icon }).addTo(map).bindPopup(popup);
+            marker.on('click', function(){ highlightFidsRowFromRadarClick(rid); });
+            activeAircraftMarkers[hw] = marker;
+          }
+        });
+        Object.keys(activeAircraftMarkers).forEach(function(id){
+          if (!currentPings[id]){ map.removeLayer(activeAircraftMarkers[id]); delete activeAircraftMarkers[id]; }
+        });
+        tbody.querySelectorAll('.btn-locate').forEach(function(btn){
+          btn.addEventListener('click', function(){
+            focusRadarOnSpecificAircraft(btn.getAttribute('data-hw'), Number(btn.getAttribute('data-lat')), Number(btn.getAttribute('data-lng')));
+          });
+        });
+      })
+      .catch(function(err){ console.error('Sync Operational Error:', err); });
+  }
+
+  window.focusRadarOnSpecificAircraft = function(hwId, lat, lng){
+    if (activeAircraftMarkers[hwId]){
+      map.setView([lat, lng], 7, { animate: true, duration: 1.5 });
+      activeAircraftMarkers[hwId].openPopup();
+    }
+  };
+
+  window.highlightFidsRowFromRadarClick = function(rid){
+    document.querySelectorAll('#public_web_fids_tbody tr').forEach(function(tr){ tr.classList.remove('fids-row-highlight'); });
+    var row = document.getElementById(rid);
+    if (row){ row.classList.add('fids-row-highlight'); row.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+  };
+
+  setInterval(syncRadarAndFidsCenter, 5000);
+  syncRadarAndFidsCenter();
+
+  function loadLeaderboardPodium(){
+    fetch('/api/v1/web/leaderboard/top')
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        var el = document.getElementById('idx_leaderboard_podium');
+        if (!el || data.status !== 'success') return;
+        var alliances = data.alliances || [];
+        if (!alliances.length){ el.innerHTML = '<p style="grid-column:1/-1;text-align:center;color:#78909c;">'+esc(ST_LB_EMPTY)+'</p>'; return; }
+        var classes = ['idx-lb-gold','idx-lb-silver','idx-lb-bronze'];
+        el.innerHTML = alliances.map(function(a, i){
+          var allianceName = a.name || '—';
+          var ceoName = a.ceo_name || 'Captain';
+          var creditsTxt = a.credits_fmt || Number(a.credits || 0).toLocaleString();
+          var members = Number(a.members || 0);
+          return '<div class="idx-lb-card '+classes[i]+'">'+
+            '<div style="font-size:12px;color:#90a4ae;margin-bottom:8px;">'+esc(ST_LB_RANK[i]||'')+'</div>'+
+            '<div style="font-size:1.35rem;font-weight:800;color:#fff;margin-bottom:8px;">'+esc(allianceName)+'</div>'+
+            '<div style="color:#64b5f6;font-size:13px;margin-bottom:6px;">'+esc(ST_LB_CEO)+': '+esc(ceoName)+'</div>'+
+            '<div style="font-family:Consolas,monospace;color:#00ff66;font-size:14px;">'+esc(ST_LB_CREDITS)+': '+esc(creditsTxt)+' CR</div>'+
+            '<div style="margin-top:6px;color:#90a4ae;font-size:12px;">'+esc(ST_LB_MEMBERS)+': '+members+'</div></div>';
+        }).join('');
+      })
+      .catch(function(){});
+  }
+  loadLeaderboardPodium();
+
+  function calculatePotentialFlightProfit(){
+    var nm = Number(document.getElementById('profit_nm_slider').value) || 1500;
+    var mult = Number(document.getElementById('profit_aircraft_select').value) || 1;
+    document.getElementById('profit_nm_label').textContent = nm;
+    var credits = Math.round(nm * 12.5 * mult + 4500);
+    var xp = Math.round(nm * 2.8 * mult + 1200);
+    var ce = document.getElementById('profit_credits_out');
+    var xe = document.getElementById('profit_xp_out');
+    if (ce) ce.textContent = credits.toLocaleString();
+    if (xe) xe.textContent = xp.toLocaleString();
+  }
+  var slider = document.getElementById('profit_nm_slider');
+  var sel = document.getElementById('profit_aircraft_select');
+  if (slider) slider.addEventListener('input', calculatePotentialFlightProfit);
+  if (sel) sel.addEventListener('change', calculatePotentialFlightProfit);
+  calculatePotentialFlightProfit();
+
+  var ST_TICKER_EMPTY = {{ t.idx_ticker_live_empty|tojson }};
+  function refreshLiveActivityTicker(){
+    fetch('/api/v1/web/ticker/live')
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        var track = document.getElementById('idx_activity_track');
+        if (!track || !data || data.status !== 'success') return;
+        var msgs = (data.messages && data.messages.length) ? data.messages : [];
+        if (!msgs.length && data.text) msgs = [data.text];
+        if (!msgs.length) msgs = [ST_TICKER_EMPTY];
+        var html = '';
+        msgs.forEach(function(m){ html += '<span class="idx-activity-item">'+esc(m)+'</span>'; });
+        track.innerHTML = html + html;
+      })
+      .catch(function(){});
+  }
+  setInterval(refreshLiveActivityTicker, 15000);
+  refreshLiveActivityTicker();
+})();
+</script>
+{% endblock %}

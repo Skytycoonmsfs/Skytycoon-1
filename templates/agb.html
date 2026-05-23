@@ -1,0 +1,41 @@
+{% extends "base.html" %}{% block title %}{{ t.page_agb_title }}{% endblock %}
+{% block body %}
+<article class="legal-doc">
+<h1>{{ t.page_agb_title }}</h1>
+{% if lang == 'de' %}
+<h2>§ 1 Geltungsbereich</h2>
+<p>Diese Allgemeinen Geschäftsbedingungen (AGB) gelten für den Erwerb und die Nutzung der digitalen Software „SkyTycoon Pro“ (nachfolgend „Software“) über skytycoon.info und verbundene Dienste.</p>
+<h2>§ 2 Vertragsgegenstand</h2>
+<p>Gegenstand ist die Einräumung eines einfachen, nicht ausschließlichen Nutzungsrechts an der Software als <strong>Lifetime-Lizenz</strong> (dauerhafte Nutzung der erworbenen Version im Rahmen der Produktbeschreibung, ohne Abo-Pflicht), soweit nicht gesetzlich zwingend anderes gilt.</p>
+<h2>§ 3 Lieferung digitaler Güter</h2>
+<p>Die Bereitstellung erfolgt durch Bereitstellung eines Lizenzschlüssels und/oder Download-Zugangs. Mit der Bereitstellung ist die Leistung erbracht, sofern dem Kunden der Zugang technisch möglich ist.</p>
+<h2>§ 4 Server-Absicherung &amp; Offline-Garantie</h2>
+<p>Die Lizenz für SkyTycoon Pro wird als zeitlich unbegrenzte <strong>Lifetime-Lizenz</strong> erworben. Sollte der zentrale Online-Server aus technischen oder wirtschaftlichen Gründen abgeschaltet werden oder dauerhaft offline gehen, erlischt das Nutzungsrecht an der Software <strong>nicht</strong>. Die Desktop-App schaltet sich in diesem Fall automatisch und unwiderruflich in den <strong>vollständigen, uneingeschränkten Offline-Karrieremodus</strong> frei. Alle lokal gespeicherten Karrieredaten bleiben auf Ihrem Rechner erhalten und weiter nutzbar.</p>
+<h2>§ 5 Nutzungsrechte und Verbote</h2>
+<p>Dem Kunden ist untersagt, die Software Dritten zur unbefugten Nutzung bereitzustellen, urheberrechtliche Vermerke zu entfernen, <strong>Software-Piraterie</strong> zu betreiben (z.&nbsp;B. unbefugte Vervielfältigung, Umgehung von Kopierschutz/Lizenzprüfungen) sowie <strong>Reverse Engineering</strong>, Dekompilierung oder Disassemblierung über das gesetzlich zwingend erlaubte Maß hinaus.</p>
+<h2>§ 6 Updates</h2>
+<p>Sofern nicht ausdrücklich anders zugesichert, besteht kein Anspruch auf künftige Funktions- oder Plattform-Updates; der Verkäufer kann Updates nach billigem Ermessen bereitstellen.</p>
+<h2>§ 7 Haftung</h2>
+<p>Die Haftung richtet nach den gesetzlichen Vorschriften; für leichte Fahrlässigkeit haften wir nur bei Verletzung wesentlicher Vertragspflichten und begrenzt auf den typischen Vertragsschaden, soweit gesetzlich zulässig.</p>
+<h2>§ 8 Schlussbestimmungen</h2>
+<p>Es gilt das Recht der Bundesrepublik Deutschland unter Ausschluss des UN-Kaufrechts, soweit zulässig. Gerichtsstand, soweit der Kunde Kaufmann ist oder keinen inländischen allgemeinen Gerichtsstand hat, ist der Sitz des Anbieters, sofern gesetzlich statthaft.</p>
+{% else %}
+<h2>1. Scope</h2>
+<p>These terms govern the purchase and use of the digital product “SkyTycoon Pro” (the “Software”) via skytycoon.info and related services.</p>
+<h2>2. Subject matter</h2>
+<p>We grant a non-exclusive licence to use the Software as a <strong>lifetime licence</strong> for the purchased version as described in the product materials, unless mandatory law provides otherwise.</p>
+<h2>3. Digital delivery</h2>
+<p>Delivery is effected by providing a licence key and/or download access. Delivery is complete when access can reasonably be obtained by the customer.</p>
+<h2>4. Server continuity &amp; offline guarantee</h2>
+<p>SkyTycoon Pro is sold as a perpetual <strong>lifetime licence</strong>. If the central online service is discontinued for technical or commercial reasons or becomes permanently unavailable, your right to use the Software <strong>does not expire</strong>. The desktop application will automatically and irrevocably enable the <strong>full unrestricted offline career mode</strong>. All locally stored career data on your machine remain available to you.</p>
+<h2>5. Restrictions</h2>
+<p>You must not enable unauthorised use by third parties, remove copyright notices, engage in <strong>piracy</strong> (including circumvention of technical protections), or perform <strong>reverse engineering</strong> beyond what mandatory law allows.</p>
+<h2>6. Updates</h2>
+<p>Unless expressly promised, there is no entitlement to future updates or compatibility with future simulator versions.</p>
+<h2>7. Liability</h2>
+<p>Liability follows applicable law; for slight negligence we are liable only for breach of material obligations and limited to typical foreseeable damages where permitted.</p>
+<h2>8. Governing law</h2>
+<p>German law applies to the extent permitted; venue as provided by law for merchants or foreign customers without domestic jurisdiction.</p>
+{% endif %}
+</article>
+{% endblock %}

@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block title %}{{ t.act_title }}{% endblock %}
+{% block body %}
+<div class="form"><h2 style="margin-top:0;">{{ t.act_heading }}</h2>
+<p style="font-size:13px;color:var(--muted);margin-top:-8px;margin-bottom:16px;">{{ t.act_intro }}</p>
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+<form method="post" action="/activate-license">
+<label>{{ t.act_keylabel }}</label>
+<input type="text" name="license_key" required autocomplete="off" placeholder="XXXXXXXX-XXXX-…"/>
+<button type="submit">{{ t.act_submit }}</button>
+</form>
+<p style="text-align:center;margin-top:16px;font-size:14px;color:var(--muted);"><a href="/dashboard">{{ t.portal_back }}</a></p>
+</div>{% endblock %}

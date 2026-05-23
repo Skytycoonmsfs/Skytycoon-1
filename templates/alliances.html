@@ -1,0 +1,113 @@
+{% extends "base.html" %}{% block title %}{{ t.page_alliances_title }}{% endblock %}
+{% block body %}
+<div class="hero" style="padding-bottom:12px;">
+<h2 style="color:#d4af37;">🤝 {{ t.page_alliances_title }}</h2>
+<p style="max-width:720px;margin:12px auto 0;color:var(--muted);font-size:15px;line-height:1.55;">{{ t.page_alliances_intro }}</p>
+{% if visitor.in_alliance %}
+<p style="color:#90caf9;font-size:14px;margin-top:12px;">{{ t.alliances_already_member }}</p>
+{% endif %}
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<div style="max-width:1100px;margin:0 auto;padding:0 16px 24px;">
+  <div style="background:#12161f;border:1px solid #2a3545;border-radius:12px;padding:20px;margin-bottom:24px;">
+    <h3 style="color:#d4af37;margin:0 0 8px;font-size:1.1rem;">📈 {% if lang == 'de' %}Vermögen Top-5 Allianzen (7 Tage){% else %}Top 5 alliance wealth (7 days){% endif %}</h3>
+    <p style="color:#90a4ae;font-size:13px;margin:0 0 14px;">{% if lang == 'de' %}Live-Finanzkurven aus der Cloud-Datenbank.{% else %}Live financial curves from the cloud database.{% endif %}</p>
+    <canvas id="skytycoonAllianceFinancialChart" style="max-height:300px;width:100%;"></canvas>
+  </div>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+  var cv = document.getElementById('skytycoonAllianceFinancialChart');
+  if (!cv || typeof Chart === 'undefined') return;
+  fetch('/api/v1/alliance/charts/financials')
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      new Chart(cv.getContext('2d'), {
+        type: 'line',
+        data: { labels: data.labels || [], datasets: data.datasets || [] },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: '#e3e7ed' } } },
+          scales: {
+            x: { grid: { color: '#2a3545' }, ticks: { color: '#aaa' } },
+            y: { grid: { color: '#2a3545' }, ticks: { color: '#aaa' } }
+          }
+        }
+      });
+    })
+    .catch(function(e){ console.error('Alliance chart:', e); });
+});
+</script>
+<div style="max-width:1100px;margin:0 auto;padding:0 16px 48px;">
+{% if alliances and alliances|length > 0 %}
+<div style="overflow-x:auto;border:1px solid #1e3a5f;border-radius:14px;background:linear-gradient(165deg,#121a24,#0d1520);box-shadow:0 8px 32px rgba(0,0,0,.35);">
+<table style="width:100%;border-collapse:collapse;font-size:14px;">
+<thead>
+<tr style="background:#0d2038;text-align:left;color:#64b5f6;">
+<th style="padding:12px 14px;">{{ t.alliances_col_rank }}</th>
+<th style="padding:12px 14px;">{{ t.alliances_col_name }}</th>
+<th style="padding:12px 14px;">{{ t.alliances_col_ceo }}</th>
+<th style="padding:12px 14px;">{{ t.alliances_col_members }}</th>
+<th style="padding:12px 14px;">{{ t.alliances_col_hubs }}</th>
+<th style="padding:12px 14px;">{{ t.alliances_col_wealth }}</th>
+<th style="padding:12px 14px;">{{ t.alliances_col_war_chest }}</th>
+<th style="padding:12px 14px;">{{ t.alliances_col_action }}</th>
+</tr>
+</thead>
+<tbody>
+{% for a in alliances %}
+<tr style="border-top:1px solid #1e2836;color:#cfd8dc;">
+<td style="padding:10px 14px;font-weight:800;color:#d4af37;">#{{ a.rank }}</td>
+<td style="padding:10px 14px;font-weight:700;color:#eceff1;">{{ a.name|e }}</td>
+<td style="padding:10px 14px;">{{ a.ceo_name|e }}</td>
+<td style="padding:10px 14px;text-align:center;">{{ a.members }}</td>
+<td style="padding:10px 14px;font-size:12px;color:#64b5f6;">{{ a.hubs_string|e }}</td>
+<td style="padding:10px 14px;color:#d4af37;font-weight:700;">{{ a.credits|round(0) }} Cr.</td>
+<td style="padding:10px 14px;color:#81c784;font-weight:700;">{{ a.tax_collected_total|default(0)|round(0) }} Cr. <span style="font-size:11px;color:#78909c;">({{ a.tax_payment_count|default(0) }} Zahlungen)</span></td>
+<td style="padding:10px 14px;white-space:nowrap;">
+{% if visitor.can_apply %}
+<button type="button" class="btn-alliance-apply" data-aid="{{ a.alliance_id|e }}" style="width:auto;padding:8px 14px;font-size:12px;background:linear-gradient(135deg,#c9a227,#8a6d12);color:#1a1510;border:none;border-radius:8px;font-weight:800;cursor:pointer;">{{ t.alliances_btn_apply }}</button>
+{% else %}
+<span style="font-size:12px;color:#78909c;">{{ t.alliances_license_lock }}</span>
+{% endif %}
+</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% else %}
+<p style="text-align:center;color:var(--muted);font-size:16px;line-height:1.6;padding:32px 20px;border:1px dashed #37474f;border-radius:12px;">{{ t.alliances_empty }}</p>
+{% endif %}
+</div>
+<script>
+(function(){
+  var MSG_OK = {{ t.alliances_apply_ok|tojson }};
+  var MSG_PENDING = {{ t.alliances_apply_pending|tojson }};
+  var MSG_MEMBER = {{ t.alliances_apply_member|tojson }};
+  var MSG_NET = {{ t.alliances_net_err|tojson }};
+  document.querySelectorAll('.btn-alliance-apply').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var aid = btn.getAttribute('data-aid');
+      if(!aid) return;
+      btn.disabled = true;
+      fetch('/api/v1/web/alliance/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ alliance_id: aid })
+      }).then(function(r){ return r.json().then(function(j){ return { ok: r.ok, j: j }; }); })
+        .then(function(x){
+          var msg = MSG_OK;
+          if(x.j && x.j.error === 'already_pending') msg = MSG_PENDING;
+          if(x.j && x.j.error === 'already_member') msg = MSG_MEMBER;
+          if(!x.ok && x.j && x.j.detail) msg = String(x.j.detail);
+          alert(msg);
+          if(x.ok) btn.textContent = '✓';
+        })
+        .catch(function(){ alert(MSG_NET); btn.disabled = false; });
+    });
+  });
+})();
+</script>
+{% endblock %}

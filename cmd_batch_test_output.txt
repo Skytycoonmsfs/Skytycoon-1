@@ -1,0 +1,5 @@
+ReTURN 0
+--- STDOUT ---
+OK
+
+--- STDERR ---

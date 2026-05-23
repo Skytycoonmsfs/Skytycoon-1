@@ -1,0 +1,5 @@
+line 2663
+        hangar_tab = QWidget()
+        hang_outer = QVBoxLayout(hangar_tab)
+        self.hangar_inner_tabs = QTabWidget()
+        hang_maint_page = QWidget()

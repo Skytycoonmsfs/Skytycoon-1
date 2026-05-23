@@ -1,0 +1,74 @@
+{% extends "base.html" %}{% block title %}Pilot — {{ pilot_name|e }}{% endblock %}
+{% block body %}
+<div style="max-width:750px;margin:32px auto;padding:0 16px 48px;">
+  <div style="background:#12161f;border:2px solid #d4af37;border-radius:10px;padding:28px;box-shadow:0 0 30px rgba(0,0,0,.5);">
+    <div style="text-align:center;margin-bottom:24px;">
+      <div style="font-size:48px;">👨‍✈️</div>
+      <h2 style="color:#d4af37;font-weight:800;margin:8px 0 4px;">{{ pilot_name|e }}</h2>
+      <p style="color:#90a4ae;font-size:13px;font-family:Consolas,monospace;margin:0;">
+        {% if lang == 'de' %}OFFIZIELLES SKYTYCOON PILOTEN-ZERTIFIKAT{% else %}OFFICIAL SKYTYCOON PILOT CERTIFICATE{% endif %}
+      </p>
+      {% if has_license == 1 %}
+      <span style="display:inline-block;margin-top:10px;background:#00ff66;color:#000;font-weight:700;font-size:11px;padding:4px 10px;border-radius:6px;">✓ LIFETIME PRO</span>
+      {% endif %}
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px;text-align:center;">
+      <div style="background:#0c0e12;border:1px solid #2a3545;border-radius:8px;padding:14px;">
+        <div style="color:#90a4ae;font-size:11px;text-transform:uppercase;">{% if lang == 'de' %}Rang / XP{% else %}Rank / XP{% endif %}</div>
+        <div style="color:#0088ff;font-weight:700;font-size:18px;">{{ xp }} XP</div>
+      </div>
+      <div style="background:#0c0e12;border:1px solid #2a3545;border-radius:8px;padding:14px;">
+        <div style="color:#90a4ae;font-size:11px;text-transform:uppercase;">{% if lang == 'de' %}Credits{% else %}Credits{% endif %}</div>
+        <div style="color:#00ff66;font-weight:700;font-size:18px;">{{ credits|round(0) }}</div>
+      </div>
+      <div style="background:#0c0e12;border:1px solid #2a3545;border-radius:8px;padding:14px;">
+        <div style="color:#90a4ae;font-size:11px;text-transform:uppercase;">{% if lang == 'de' %}Reputation{% else %}Reputation{% endif %}</div>
+        <div style="color:#ffcc00;font-weight:700;font-size:18px;">{{ reputation|round(1) }} %</div>
+      </div>
+    </div>
+    <h4 style="color:#d4af37;border-bottom:1px solid #2a3545;padding-bottom:6px;">🏆 {% if lang == 'de' %}Medaillen{% else %}Medals{% endif %}</h4>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;margin:12px 0 20px;">
+      {% if "BUTTER_PILOT" in awards %}
+      <div style="text-align:center;padding:10px;background:#0c0e12;border:1px solid #00ff66;border-radius:6px;width:100px;">
+        <div style="font-size:22px;">🥞</div>
+        <span style="color:#00ff66;font-weight:700;font-size:11px;">Butter-Pilot</span>
+      </div>
+      {% else %}
+      <div style="text-align:center;padding:10px;background:#0c0e12;border:1px dashed #2a3545;border-radius:6px;width:100px;opacity:.35;color:#78909c;">
+        <div style="font-size:22px;">🔒</div>
+        <span style="font-size:11px;">Butter-Pilot</span>
+      </div>
+      {% endif %}
+    </div>
+    <h4 style="color:#0088ff;border-bottom:1px solid #2a3545;padding-bottom:6px;">🛩️ {% if lang == 'de' %}Letzte Flüge (Blackbox){% else %}Recent flights{% endif %}</h4>
+    <div style="overflow-x:auto;margin-top:10px;">
+      <table style="width:100%;border-collapse:collapse;font-family:Consolas,monospace;font-size:13px;">
+        <thead>
+          <tr style="color:#90a4ae;">
+            <th style="padding:8px;text-align:left;">Route</th>
+            <th style="padding:8px;">NM</th>
+            <th style="padding:8px;">{% if lang == 'de' %}Auszahlung{% else %}Payout{% endif %}</th>
+            <th style="padding:8px;">Phase</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for flight in recent_flights %}
+          <tr style="border-top:1px solid #263238;">
+            <td style="padding:8px;color:#d4af37;font-weight:700;">🟢 {{ flight.dep }} → {{ flight.arr }}</td>
+            <td style="padding:8px;">{{ flight.dist }}</td>
+            <td style="padding:8px;color:#00ff66;">+{{ flight.credits }}</td>
+            <td style="padding:8px;">{{ flight.phase }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4" style="text-align:center;color:#78909c;padding:16px;">{% if lang == 'de' %}Noch keine Flugdaten in der Cloud.{% else %}No flight data in the cloud yet.{% endif %}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p style="text-align:center;color:#78909c;font-size:12px;margin:20px 0 0;border-top:1px solid #2a3545;padding-top:14px;">
+      {% if lang == 'de' %}Verifiziert durch skytycoon.info{% else %}Verified by skytycoon.info{% endif %}
+      · <a href="/">{% if lang == 'de' %}Zur Startseite{% else %}Home{% endif %}</a>
+    </p>
+  </div>
+</div>
+{% endblock %}

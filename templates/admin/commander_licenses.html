@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% block title %}Admin Lizenzen{% endblock %}{% block body %}
+<section style="max-width:640px;margin:0 auto;padding:32px 16px;color:#e3e7ed;">
+<h2 style="color:#d4af37;">🔐 Admin Commander — Module</h2>
+<input id="apw" type="password" placeholder="Admin password" style="width:100%;padding:10px;margin:8px 0;"/>
+<input id="ahid" placeholder="hardware_id" style="width:100%;padding:10px;margin:8px 0;"/>
+<input id="amod" placeholder="module_key e.g. mod_jobs" style="width:100%;padding:10px;margin:8px 0;"/>
+<button id="agrant" style="background:#d4af37;color:#000;border:0;padding:12px;font-weight:700;width:100%;">Grant</button>
+<pre id="aout" style="margin-top:12px;color:#90a4ae;"></pre>
+</section>
+<script>
+document.getElementById('agrant').onclick=function(){
+  fetch('/api/v1/admin/commander/licenses/grant',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({admin_password:document.getElementById('apw').value,hardware_id:document.getElementById('ahid').value,module_key:document.getElementById('amod').value})
+  }).then(r=>r.json()).then(d=>{document.getElementById('aout').textContent=JSON.stringify(d,null,2);});
+};
+</script>
+{% endblock %}

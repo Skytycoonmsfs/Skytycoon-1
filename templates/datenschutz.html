@@ -1,0 +1,39 @@
+{% extends "base.html" %}{% block title %}{{ t.page_datenschutz_title }}{% endblock %}
+{% block body %}
+<article class="legal-doc">
+<h1>{{ t.page_datenschutz_title }}</h1>
+{% if lang == 'de' %}
+<p>Diese Datenschutzerklärung informiert Sie über die Verarbeitung personenbezogener Daten im Zusammenhang mit dem Web-Portal und der Lizenz-/Account-Verwaltung von SkyTycoon Pro (Host: IONOS, Serverstandort je nach Vertrag).</p>
+<h2>1. Verantwortlicher</h2>
+<p>Verantwortlich ist der oben im <a href="/impressum">Impressum</a> genannte Diensteanbieter, erreichbar unter <a href="mailto:info@skytycoon.info">info@skytycoon.info</a>.</p>
+<h2>2. Hosting und Server-Logs</h2>
+<p>Beim Aufruf unserer Webseiten werden durch den Hosting-Provider automatisch Informationen in sogenannten Server-Logfiles gespeichert (z.&nbsp;B. IP-Adresse, Datum und Uhrzeit, User-Agent). Die Verarbeitung erfolgt zur Gewährleistung der Sicherheit (z.&nbsp;B. Missbrauchsbekämpfung) und auf Grundlage von Art. 6 Abs. 1 lit. f DSGVO.</p>
+<h2>3. Kundenkonto, Registrierung und Hardware-ID</h2>
+<p>Zur Bereitstellung der Lizenz- und Cloud-Funktionen verarbeiten wir u.&nbsp;a. Ihre E-Mail-Adresse, einen frei wählbaren Pilotennamen, ein technisches Gerätekennzeichen (<strong>Hardware-ID</strong>) sowie Sicherheitsdaten zur Authentifizierung. Die Hardware-ID dient der eindeutigen Zuordnung Ihrer Lizenz und Karriere-Synchronisation und wird <strong>verschlüsselt bzw. sicher gespeichert</strong> (Zugriff nur über authentifizierte API-Endpunkte).</p>
+<h2>4. Passwörter</h2>
+<p>Passwörter werden <strong>nicht im Klartext</strong> gespeichert, sondern als <strong>bcrypt-Hash</strong> (Passwort-Hashing) in der Server-Datenbank abgelegt. Ein Rückschluss auf Ihr Passwort ist damit praktisch ausgeschlossen.</p>
+<h2>5. Zahlungen (PayPal)</h2>
+<p>Die Abwicklung von Zahlungen erfolgt über den Zahlungsdienstleister <strong>PayPal (Europe) S.à r.l. et Cie, S.C.A.</strong> etc. Es gelten die Datenschutzbestimmungen von PayPal. Wir erhalten Zahlungsbestätigungen und die bei PayPal hinterlegte bzw. übermittelte E-Mail-Adresse, soweit zur Lizenzvergabe erforderlich.</p>
+<h2>6. Speicherdauer</h2>
+<p>Wir speichern Daten, solange dies für die Vertragserfüllung (Lifetime-Lizenz), gesetzliche Aufbewahrungsfristen oder berechtigte Sicherheitsbelange erforderlich ist.</p>
+<h2>7. Ihre Rechte</h2>
+<p>Sie haben nach Maßgabe der DSGVO Rechte auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit sowie Widerspruch gegen bestimmte Verarbeitungen. Außerdem besteht ein Beschwerderecht bei einer Datenschutzaufsichtsbehörde.</p>
+{% else %}
+<p>This privacy policy describes how personal data is processed in connection with the SkyTycoon Pro web portal and license/account services (hosted on IONOS as applicable).</p>
+<h2>1. Controller</h2>
+<p>The controller is the service provider named in the <a href="/impressum">legal notice</a>, reachable at <a href="mailto:info@skytycoon.info">info@skytycoon.info</a>.</p>
+<h2>2. Hosting and server logs</h2>
+<p>When you visit our site, the hosting provider may automatically collect server log data (e.g. IP address, timestamp, user agent) for security and stability, based on legitimate interests (GDPR Art. 6(1)(f)).</p>
+<h2>3. Account data and hardware ID</h2>
+<p>To provide licensing and optional cloud features we process your email address, pilot display name, a device identifier (<strong>hardware ID</strong>) for license binding, and authentication secrets. The hardware ID is stored with appropriate safeguards and used only for license and sync operations.</p>
+<h2>4. Passwords</h2>
+<p>Passwords are stored as <strong>bcrypt hashes</strong>, not in plain text.</p>
+<h2>5. Payments (PayPal)</h2>
+<p>Payments are processed by <strong>PayPal</strong>. PayPal’s privacy policy applies to payment data. We receive confirmations and payer contact data as needed to deliver your license.</p>
+<h2>6. Retention</h2>
+<p>We retain data as long as required for contract performance (lifetime license), legal obligations, or legitimate security needs.</p>
+<h2>7. Your rights</h2>
+<p>Subject to applicable law, you may have rights to access, rectification, erasure, restriction, portability, and objection, and the right to lodge a complaint with a supervisory authority.</p>
+{% endif %}
+</article>
+{% endblock %}

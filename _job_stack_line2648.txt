@@ -1,0 +1,8 @@
+        ch_l.addWidget(charter_frame)
+        ch_l.addStretch()
+        self._stack_job_board.addWidget(page_market)
+        self._stack_job_board.addWidget(page_active)
+        self._stack_job_board.addWidget(page_charter)
+        job_root.addWidget(self.job_board_tabs, stretch=0)
+        job_root.addWidget(self._stack_job_board, stretch=1)
+        self._apply_flugboerse_table_layout_boost()

@@ -1,0 +1,166 @@
+{% extends "base.html" %}{% block title %}{{ t.reg_title }}{% endblock %}
+{% block body %}
+<style>
+.reg-shell { max-width:540px; margin:32px auto 56px; padding:0 16px; }
+.reg-card {
+  background:linear-gradient(165deg,#0a0a0c 0%,#121018 55%,#0d0d12 100%);
+  border:2px solid #d4af37; border-radius:16px; padding:28px 26px;
+  box-shadow:0 18px 48px rgba(0,0,0,.55), 0 0 40px rgba(212,175,55,.08);
+}
+.reg-title { margin:0 0 6px; color:#ffd54f; font-weight:900; letter-spacing:.08em; font-size:1.45rem; text-align:center; }
+.reg-sub { text-align:center; color:#d4af37; font-size:12px; letter-spacing:.12em; margin:0 0 18px; text-transform:uppercase; }
+.reg-card .intro { color:#90a4ae; font-size:14px; line-height:1.55; margin:0 0 20px; }
+.reg-card label { color:#b0bec5; }
+.reg-card input, .reg-card select {
+  background:#050508 !important; border:1px solid #3d3520 !important; color:#f5f5f5 !important;
+}
+.reg-card input:focus, .reg-card select:focus { border-color:#d4af37 !important; box-shadow:0 0 0 2px rgba(212,175,55,.25); }
+.reg-card button[type=submit] {
+  background:linear-gradient(135deg,#b8860b,#ffd54f,#b8860b) !important; color:#111 !important;
+  font-weight:900 !important; letter-spacing:.04em; margin-top:8px;
+}
+.reg-info { background:rgba(46,125,50,.15); border:1px solid #66bb6a; color:#c8e6c9; padding:12px; border-radius:10px; margin-bottom:16px; font-size:14px; }
+.reg-opt { font-size:12px; color:#78909c; margin-top:20px; padding-top:16px; border-top:1px solid #2a3545; }
+.reg-name-warn { background:rgba(183,28,28,.15); border:1px solid #ef5350; color:#ffcdd2; padding:12px; border-radius:10px; margin:0 0 14px; font-size:14px; }
+.reg-suggest-row { display:flex; flex-wrap:wrap; gap:10px; margin:0 0 16px; }
+.reg-suggest-btn {
+  flex:1 1 140px; min-height:44px; padding:10px 14px; border-radius:10px; cursor:pointer;
+  background:linear-gradient(135deg,#b8860b,#ffd54f,#b8860b); color:#111; font-weight:900;
+  border:2px solid #d4af37; letter-spacing:.03em;
+}
+.reg-suggest-btn:hover { filter:brightness(1.08); }
+.reg-lang-wiki {
+  margin: 8px 0 16px; padding: 12px 14px;
+  border: 1px solid #d4af37; border-radius: 10px;
+  background: rgba(212,175,55,.08); color: #e8d48b;
+  font-size: 13px; line-height: 1.55;
+}
+</style>
+<div class="reg-shell">
+<div class="reg-card">
+<h1 class="reg-title">👑 PILOTEN-REGISTRIERUNG</h1>
+<p class="reg-sub">PILOT REGISTRATION</p>
+<p class="intro">{{ t.reg_intro }}</p>
+{% if info_banner %}<div class="reg-info">{{ info_banner }}</div>{% endif %}
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+<div id="reg-name-warn" class="reg-name-warn" style="display:none;"></div>
+<div id="reg-suggest-row" class="reg-suggest-row" style="display:none;"></div>
+{% if name_suggestions %}
+<div class="reg-name-warn">
+  {% if lang == 'de' %}Pilotenname vergeben — wähle einen freien Vorschlag:{% else %}Pilot name taken — pick a free suggestion:{% endif %}
+</div>
+<div class="reg-suggest-row">
+  {% for s in name_suggestions %}
+  <button type="button" class="reg-suggest-btn" data-name="{{ s|e }}">{{ s|e }}</button>
+  {% endfor %}
+</div>
+{% endif %}
+<form method="post" action="/register" target="_blank" autocomplete="off" id="reg-form">
+<label>👤 {{ t.reg_pilot }}</label>
+<input type="text" name="pilot_name" id="reg-pilot-name" required maxlength="120" autocomplete="off"
+  placeholder="{% if lang == 'de' %}z. B. Captain_Müller{% else %}e.g. Captain_Smith{% endif %}"/>
+<label>📧 {{ t.reg_email }}</label>
+<input type="email" name="email" required placeholder="you@example.com" autocomplete="off"/>
+<p style="font-size:12px;color:#78909c;margin:-6px 0 12px;">{{ t.reg_email_hint }}</p>
+<label>🔒 {{ t.reg_password }}</label>
+<input type="password" name="password" required minlength="4" autocomplete="new-password"/>
+<label>🌐 {{ t.reg_lang }}</label>
+<select name="selected_language" id="reg-lang-select" required>
+<option value="de">Deutsch (DE)</option>
+<option value="en">English (EN)</option>
+</select>
+<p id="reg-lang-wiki" class="reg-lang-wiki"
+  data-de="💡 Deine hier gewählte Sprache wird vollautomatisch für deine Willkommens-E-Mail, rechtssichere PDF-Rechnungen und dein gesamtes Desktop-App-Cockpit am PC übernommen!"
+  data-en="💡 Your language selected here will be automatically applied to your welcome email, legal PDF invoices, and your entire desktop app cockpit on your PC!">
+  💡 Deine hier gewählte Sprache wird vollautomatisch für deine Willkommens-E-Mail, rechtssichere PDF-Rechnungen und dein gesamtes Desktop-App-Cockpit am PC übernommen!
+</p>
+<p class="reg-opt">{{ t.reg_optional_key }}</p>
+<label style="font-size:11px;text-transform:none;letter-spacing:0;">{{ t.reg_license }}</label>
+<input type="text" name="license_key" maxlength="200" placeholder="ST-XXXX-XXXX-XXXX" autocomplete="off"/>
+<button type="submit">{{ t.reg_submit }}</button>
+</form>
+<p style="text-align:center;margin-top:18px;font-size:14px;"><a href="/login" target="_blank">{{ t.reg_login_link }}</a></p>
+</div>
+</div>
+<script>
+(function () {
+  var pilotIn = document.getElementById('reg-pilot-name');
+  var emailIn = document.querySelector('input[name="email"]');
+  var warn = document.getElementById('reg-name-warn');
+  var row = document.getElementById('reg-suggest-row');
+  var lang = '{{ lang|default("de") }}';
+  var timer = null;
+  function bindSuggestButtons(scope) {
+    (scope || document).querySelectorAll('.reg-suggest-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var n = btn.getAttribute('data-name') || btn.textContent || '';
+        if (pilotIn && n) pilotIn.value = n;
+        if (warn) warn.style.display = 'none';
+        if (row) row.style.display = 'none';
+      });
+    });
+  }
+  bindSuggestButtons(document);
+  function renderSuggestions(list) {
+    if (!row) return;
+    row.innerHTML = '';
+    (list || []).forEach(function (name) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'reg-suggest-btn';
+      b.setAttribute('data-name', name);
+      b.textContent = name;
+      row.appendChild(b);
+    });
+    bindSuggestButtons(row);
+    row.style.display = 'flex';
+  }
+  function checkName() {
+    var wish = (pilotIn && pilotIn.value || '').trim();
+    var em = (emailIn && emailIn.value || '').trim();
+    if (!wish || wish.length < 2) {
+      if (warn) warn.style.display = 'none';
+      if (row) row.style.display = 'none';
+      return;
+    }
+    var url = '/api/v1/auth/check_pilot_name?pilot_name=' + encodeURIComponent(wish);
+    if (em) url += '&email=' + encodeURIComponent(em);
+    fetch(url, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || j.status !== 'name_taken') {
+          if (warn) warn.style.display = 'none';
+          if (row) row.style.display = 'none';
+          return;
+        }
+        if (warn) {
+          warn.textContent = lang === 'en'
+            ? 'This pilot name is already taken. Pick a gold suggestion:'
+            : 'Dieser Pilotenname ist bereits vergeben. Wähle einen Gold-Vorschlag:';
+          warn.style.display = 'block';
+        }
+        renderSuggestions(j.suggestions || []);
+      })
+      .catch(function () {});
+  }
+  if (pilotIn) {
+    pilotIn.addEventListener('input', function () {
+      clearTimeout(timer);
+      timer = setTimeout(checkName, 420);
+    });
+    pilotIn.addEventListener('blur', checkName);
+  }
+  var langSel = document.getElementById('reg-lang-select');
+  var langWiki = document.getElementById('reg-lang-wiki');
+  function syncLangWiki() {
+    if (!langWiki || !langSel) return;
+    var lg = langSel.value === 'en' ? 'en' : 'de';
+    langWiki.textContent = langWiki.getAttribute('data-' + lg) || langWiki.textContent;
+  }
+  if (langSel) {
+    langSel.addEventListener('change', syncLangWiki);
+    syncLangWiki();
+  }
+})();
+</script>
+{% endblock %}

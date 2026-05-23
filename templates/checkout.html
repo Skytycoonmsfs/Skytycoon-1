@@ -1,0 +1,110 @@
+{% extends "base.html" %}{% block title %}{{ t.checkout_title }}{% endblock %}
+{% block body %}
+<style>
+.checkout-wrap{max-width:640px;margin:0 auto;padding:24px 16px 48px;}
+.checkout-gold{background:linear-gradient(135deg,#1a1508 0%,#2d2208 50%,#1a1508 100%);border:2px solid #d4af37;border-radius:12px;padding:18px 20px;margin-bottom:24px;text-align:center;box-shadow:0 0 24px rgba(212,175,55,.25);}
+.checkout-gold h3{margin:0 0 8px;color:#ffd54f;font-size:1.15rem;letter-spacing:.06em;}
+.checkout-gold .code{font-family:Consolas,monospace;font-size:1.5rem;font-weight:800;color:#00ff66;letter-spacing:.12em;}
+.checkout-gold p{margin:8px 0 0;color:#c5b358;font-size:14px;}
+</style>
+<div class="checkout-wrap">
+  <h2 style="margin-top:0;color:#64b5f6;">{{ t.checkout_title }}</h2>
+  <p style="color:var(--muted);line-height:1.55;">{% if lang == 'de' %}Lifetime-Lizenz · sicherer PayPal-Checkout{% else %}Lifetime license · secure PayPal checkout{% endif %}</p>
+  <p class="price-tag" style="font-size:1.1rem;color:#eceff1;">{% if lang == 'de' %}Listenpreis:{% else %}List price:{% endif %} <strong style="color:#d4af37;">{{ current_shop_price }} €</strong></p>
+
+  {% if banner_code %}
+  <div class="checkout-gold">
+    <h3>✨ {{ t.checkout_active_banner }}</h3>
+    <div class="code">{{ banner_code|e }}</div>
+    {% if banner_discount and banner_discount > 0 %}
+    <p>{% if lang == 'de' %}{{ banner_discount }} % Rabatt aktiv{% else %}{{ banner_discount }}% discount active{% endif %}</p>
+    {% endif %}
+    <p style="font-size:12px;margin-top:12px;">{{ t.checkout_promo_hint }}</p>
+  </div>
+  {% endif %}
+
+  <div class="form" style="max-width:100%;text-align:left;">
+    <label>{{ t.dash_shop_promo_label }}</label>
+    <input type="text" name="promo_code" id="checkout_promo" maxlength="48" placeholder="{{ t.buy_promo_placeholder }}" autocomplete="off"/>
+    <p style="font-size:12px;color:#78909c;">{{ t.dash_shop_promo_hint }}</p>
+    <p id="checkout_err" style="display:none;color:#ff5252;font-weight:700;">{{ checkout_err_invalid|e }}</p>
+    {% if paypal_client_id %}
+    <div id="paypal-button-container" style="margin-top:20px;min-height:45px;"></div>
+    {% else %}
+    <p style="color:#ff9800;">PayPal nicht konfiguriert.</p>
+    {% endif %}
+    <p style="margin-top:20px;text-align:center;">
+      <a href="/dashboard" target="_blank" rel="noopener" style="color:#64b5f6;">{% if lang == 'de' %}Zum Dashboard{% else %}Open dashboard{% endif %}</a>
+      ·
+      <a href="/register" target="_blank" rel="noopener" style="color:#64b5f6;">{% if lang == 'de' %}Registrierung{% else %}Register{% endif %}</a>
+    </p>
+  </div>
+</div>
+
+{% if paypal_client_id %}
+<script src="https://www.paypal.com/sdk/js?client-id={{ paypal_client_id|e }}&amp;currency=EUR&amp;intent=capture&amp;components=buttons"></script>
+<script>
+(function(){
+  var errEl = document.getElementById('checkout_err');
+  function showErr(msg){
+    if (!errEl) return;
+    errEl.textContent = msg || errEl.textContent;
+    errEl.style.display = 'block';
+  }
+  function postJson(url, body){
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body || {})
+    });
+  }
+  function promoVal(){
+    var el = document.getElementById('checkout_promo');
+    return (el && el.value) ? String(el.value).trim() : '';
+  }
+  if (typeof paypal === 'undefined') return;
+  paypal.Buttons({
+    style: { layout: 'vertical', color: 'gold', shape: 'rect', label: 'pay' },
+    createOrder: function(){
+      return postJson('/api/v1/paypal/create-order', { promo_code: promoVal() })
+        .then(function(r){
+          if (r.status === 401) { window.open('/login', '_blank'); throw new Error('login'); }
+          return r.json().then(function(j){
+            if (!r.ok) {
+              var msg = (j && j.message) ? String(j.message) : '{{ checkout_err_invalid|e }}';
+              showErr(msg);
+              throw new Error(msg);
+            }
+            return j;
+          });
+        })
+        .then(function(d){
+          if (d && d.free) {
+            window.open('/dashboard?purchased=1&free=1', '_blank');
+            throw new Error('free_done');
+          }
+          var oid = (d && (d.id || d.order_id)) ? (d.id || d.order_id) : '';
+          if (!oid) throw new Error('no_id');
+          return oid;
+        });
+    },
+    onApprove: function(data){
+      return postJson('/api/v1/paypal/capture-order', { orderID: data.orderID })
+        .then(function(r){ if (!r.ok) throw new Error('capture'); return r.json(); })
+        .then(function(d){
+          var url = d.purchase_show_token
+            ? '/purchase-success?t=' + encodeURIComponent(d.purchase_show_token)
+            : '/dashboard?purchased=1';
+          window.open(url, '_blank');
+        });
+    },
+    onError: function(err){
+      if (String((err && err.message) || err) === 'free_done') return;
+      showErr((err && err.message) || String(err));
+    }
+  }).render('#paypal-button-container');
+})();
+</script>
+{% endif %}
+{% endblock %}

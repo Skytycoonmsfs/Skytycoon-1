@@ -1,0 +1,7 @@
+{
+  "version": "1.0.0-GOLD",
+  "url": "https://DEINE-DOMAIN/downloads/SkyTycoon_Pro_Setup.exe",
+  "changelog": "Kurzer Text für den Update-Dialog.",
+  "mandatory": false,
+  "release_channel": "all"
+}

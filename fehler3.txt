@@ -1,0 +1,78 @@
+================================================================================
+FEHLER3 — Vollscan Neuer Ordner (2) nach fehler2-Abarbeitung
+================================================================================
+Stand: 2026-05-20 | PLATIN_BUILD: 20260520-fehler2-v7
+
+================================================================================
+A. FEHLER2-PUNKTE — ABARBEITUNGSSTATUS
+================================================================================
+
+[OK] download_cabin_sounds.py     — erstellt, CDN + download_all/async
+[OK] skytycoon_auto_cabin.py      — erstellt, tick_auto_cabin_audio + GSX-Kette
+[OK] skytycoon_prestige_pack.py   — erstellt, Type-Rating + pg_* + resolve_rank
+[OK] Logout skytycoon_extensions  — win.hide(), purge, StartupAuthDialog
+[OK] server_backend cloud_sync    — Portal-Repair VOR HWID-403 (Patrick.S Slot)
+[OK] Audio Extensions             — nur QSoundEffect, Forward-Slash, 75%
+[OK] Cache geloescht + Deploy      — m216_hotfix_deploy ausgefuehrt
+
+================================================================================
+B. IMPORT-KOPPLUNG main.py (LAYOUT UNVERAENDERT)
+================================================================================
+
+Zeile 10:   from skytycoon_extensions import inject_platin_features  [OK]
+Zeile 11996: inject_platin_features(self) nach super().__init__()  [OK]
+main.py lazy:
+  download_cabin_sounds  ~2834  -> Datei existiert jetzt [OK]
+  skytycoon_auto_cabin   ~21901 -> Datei existiert jetzt [OK]
+  skytycoon_prestige_pack ~1436+ -> Datei existiert jetzt [OK]
+
+================================================================================
+C. MODULE-INVENTAR PROJEKTROOT
+================================================================================
+
+VORHANDEN:
+  main.py, skytycoon_extensions.py, server_backend.py
+  skytycoon_pg.py, skytycoon_profile_cloud.py, skytycoon_settings_dialog.py
+  wirtschaft_m216_extension.py (nur Server)
+  download_cabin_sounds.py, skytycoon_auto_cabin.py, skytycoon_prestige_pack.py
+
+ASSETS:
+  assets/sounds/*.wav — 56 Dateien [OK]
+
+================================================================================
+D. NOCH OFFEN / UNGETESTET AM PC
+================================================================================
+
+[!] login_widget fehlt in main.py — Logout nutzt Modal-Dialog (by design)
+[!] Patrick.S Login — Server + frischer Start testen
+[!] Echte Menschen-Stimmen WAV — CDN abhaengig; Synth-Fallback aktiv
+[!] PyInstaller EXE — neu bauen wenn .exe genutzt wird
+[FROZEN] EFB-Tab entfernen / Bank umbenennen — nur main.py
+
+================================================================================
+E. SERVER IONOS (letzter Deploy)
+================================================================================
+
+skytycoon.service              — deploy + restart via m216_hotfix_deploy
+skytycoon-discord-bot.service  — restart
+skytycoon_extensions.py        — auf Server hochgeladen
+server_backend.py              — cloud_sync Repair-Reihenfolge live
+
+================================================================================
+F. NAECHSTE SCHRITTE FUER PILOT
+================================================================================
+
+1. SkyTycoon komplett beenden
+2. cd "Neuer Ordner (2)"
+3. python main.py
+4. Logout / Patrick.S / Pax-Tab-Audio pruefen
+
+================================================================================
+G. ZUSAMMENFASSUNG
+================================================================================
+
+fehler2.txt Punkte technisch: [ERFUELLT]
+Projekt-Audit offene PC-Tests: [3-4 Punkte]
+main.py Layout: [UNBERUEHRT ausser Import+Trigger]
+
+Ende fehler3.txt

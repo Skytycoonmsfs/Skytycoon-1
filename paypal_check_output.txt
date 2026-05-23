@@ -1,0 +1,30 @@
+INFO:     31.10.155.56:0 - "POST /api/v1/paypal/create-order HTTP/1.1" 503 Service Unavailable
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1614951]
+INFO:     Started server process [1654309]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1654309]
+INFO:     Started server process [1654402]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     31.10.155.56:0 - "GET /api/v1/web/dispatch/briefing HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+---
+# PayPal environment file
+# Tragen Sie hier die PayPal-Credentials ein:
+# PAYPAL_CLIENT_ID=...
+# PAYPAL_CLIENT_SECRET=...
+# PAYPAL_WEBHOOK_ID=...
+# PAYPAL_MODE=live
+# PAYPAL_PRODUCT_EUR=19.99
+
+ERR:

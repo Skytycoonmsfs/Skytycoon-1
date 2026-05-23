@@ -1,0 +1,542 @@
+=== line 2610 new_string (snippet) ===
+        self._install_six_main_hub_tabs(
+            tabs,
+            career=career,
+            market=market,
+            hangar_tab=hangar_tab,
+            bank_tab=bank_tab,
+            job_tab=job_tab,
+            flight_tab=flight_tab,
+            gsx_tab=gsx_tab,
+            cabin_soundboard_tab=cabin_soundboard_tab,
+            profile_tab=profile_tab,
+            crew_tab=crew_tab,
+            efb_tab=efb_tab,
+            alliances_tab=self.tab_alliances,
+            blackbox_tab=self.tab_blackbox,
+            fids_tab=self.tab_fids_board,
+            acars_tab=self.tab_acars,
+        )
+
+=== line 2610 new_string ===
+    def _install_six_main_hub_tabs(
+        self,
+        tabs: QTabWidget,
+        *,
+        career: QWidget,
+        market: QWidget,
+        hangar_tab: QWidget,
+        bank_tab: QWidget,
+        job_tab: QWidget,
+        flight_tab: QWidget,
+        gsx_tab: QWidget,
+        cabin_soundboard_tab: QWidget,
+        profile_tab: QWidget,
+        crew_tab: QWidget,
+        efb_tab: QWidget,
+        alliances_tab: QWidget,
+        blackbox_tab: QWidget,
+        fids_tab: QWidget,
+        acars_tab: QWidget,
+    ) -> None:
+        """70-Säulen-Hub: 6 Hauptreiter mit Unter-Tabs (kein Tab-Spam)."""
+        self._hub_tabwidgets: dict[int, QTabWidget] = {}
+        self._hub_sub_i18n: list[tuple[QTabWidget, str, str]] = []
+
+        def _hub(
+            hub_key: str,
+            hub_default: str,
+            subtabs: list[tuple[QWidget, str, str]],
+            header: QWidget | None = None,
+        ) -> int:
+            host = QWidget()
+            lay = QVBoxLayout(host)
+            lay.setContentsMargins(4, 4, 4, 4)
+            if header is not None:
+                lay.addWidget(header)
+            inner = QTabWidget()
+            for widget, sk, sd in subtabs:
+                inner.addTab(widget, self._tr(sk, sd))
+                self._hub_sub_i18n.append((inner, sk, sd))
+            lay.addWidget(inner, 1)
+            ix = tabs.addTab(host, self._tr(hub_key, hub_default))
+            self._hub_tabwidgets[ix] = inner
+            inner.currentChanged.connect(
+                lambda _i, hub_ix=ix: self._on_hub_inner_tab_changed(hub_ix)
+            )
+            return ix
+
+        hub1_header = QLabel(
+            self._tr(
+                "hub.career.header",
+                "Pilot · Swiss-Allianz · IONOS-Netzwerk — Status im Karriere-Dashboard.",
+            )
+        )
+        hub1_header.setWordWrap(True)
+        hub1_header.setStyleSheet("color:#cfd8dc;font-size:12px;padding:4px;")
+        self._i18n_register(
+            hub1_header,
+            "hub.career.header",
+            "Pilot · Swiss-Allianz · IONOS-Netzwerk — Status im Karriere-Dashboard.",
+        )
+
+        prestige_tab = QWidget()
+        prest_l = QVBoxLayout(prestige_tab)
+        prest_info = QLabel(
+            self._tr(
+                "hub.career.prestige_hint",
+                "Prestige-Reset & Endgame: Web-Karriere-Verwaltung (25-€-Lizenz bleibt geschützt).",
+            )
+        )
+        prest_info.setWordWrap(True)
+        self._i18n_register(
+            prest_info,
+            "hub.career.prestige_hint",
+            "Prestige-Reset & Endgame: Web-Karriere-Verwaltung (25-€-Lizenz bleibt geschützt).",
+        )
+        prest_l.addWidget(prest_info)
+        btn_prestige = QPushButton(
+            self._tr("hub.career.prestige_open", "🔄 Prestige-Reset im Browser öffnen")
+        )
+        self._i18n_register(
+            btn_prestige,
+            "hub.career.prestige_open",
+            "🔄 Prestige-Reset im Browser öffnen",
+        )
+        btn_prestige.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://skytycoon.info/player/career_backup")
+            )
+        )
+        prest_l.addWidget(btn_prestige)
+        prest_l.addStretch()
+
+        dispatch_header = QWidget()
+        dh_l = QVBoxLayout(dispatch_header)
+        dh_l.setContentsMargins(0, 0, 0, 0)
+        if hasattr(self, "btn_open_dispatch_center"):
+            dh_l.addWidget(self.btn_open_dispatch_center)
+
+        events_tab = QWidget()
+        ev_l = QVBoxLayout(events_tab)
+        ev_intro = QLabel(
+            self._tr(
+                "hub.dispatch.events_intro",
+                "Krisen- & Eventradar: globale Wetter- und Event-Übersicht (Web, neuer Tab).",
+            )
+        )
+        ev_intro.setWordWrap(True)
+        self._i18n_register(
+            ev_intro,
+            "hub.dispatch.events_intro",
+            "Krisen- & Eventradar: globale Wetter- und Event-Übersicht (Web, neuer Tab).",
+        )
+        ev_l.addWidget(ev_intro)
+        btn_events = QPushButton(
+            self._tr("hub.dispatch.events_open", "🌦️ Eventradar öffnen")
+        )
+        self._i18n_register(
+            btn_events, "hub.dispatch.events_open", "🌦️ Eventradar öffnen"
+        )
+        btn_events.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://skytycoon.info/market/weather")
+            )
+        )
+        ev_l.addWidget(btn_events)
+        btn_radar = QPushButton(
+            self._tr("hub.dispatch.radar_open", "📡 Live-Radar öffnen")
+        )
+        self._i18n_register(
+            btn_radar, "hub.dispatch.radar_open", "📡 Live-Radar öffnen"
+        )
+        btn_radar.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://skytycoon.info/market/radar"))
+        )
+        ev_l.addWidget(btn_radar)
+        ev_l.addStretch()
+
+        self._hub_ix_career = _hub(
+            "tab.hub.career",
+            "👤 Karriere & Allianz",
+            [
+                (career, "hub.career.stats", "📊 Statistik & 20 Ränge"),
+                (alliances_tab, "hub.career.alliance", "🏢 Allianz-Krieg"),
+                (prestige_tab, "hub.career.prestige", "🔄 Prestige-Reset"),
+                (profile_tab, "hub.career.profile", "👤 Pilotenprofil"),
+            ],
+            header=hub1_header,
+        )
+        self._hub_ix_dispatch = _hub(
+            "tab.hub.dispatch",
+            "✈️ Flugbörse & Dispatcher",
+            [
+                (job_tab, "hub.dispatch.jobs", "📋 Vorgefertigte Jobs"),
+                (flight_tab, "hub.dispatch.flight", "✈️ Aktueller Flug"),
+                (gsx_tab, "hub.dispatch.gsx", "🛫 GSX Abfertigung"),
+                (events_tab, "hub.dispatch.events", "🌦️ Krisen- & Eventradar"),
+                (fids_tab, "hub.dispatch.fids", "📡 Live-Flugtafel (FIDS)"),
+                (blackbox_tab, "hub.dispatch.blackbox", "🛩️ Blackbox"),
+                (acars_tab, "hub.dispatch.acars", "📡 ACARS-Funk"),
+                (efb_tab, "hub.dispatch.efb", "📱 EFB-Tablet"),
+            ],
+            header=dispatch_header,
+        )
+        self._hub_ix_hangar = _hub(
+            "tab.hub.hangar",
+            "🛩️ Hangar, Werft & Crafting",
+            [
+                (hangar_tab, "hub.hangar.fleet", "✈️ Flottenliste"),
+                (market, "hub.hangar.market", "🛒 Flugzeug-Marktplatz"),
+            ],
+        )
+        self._hub_ix_cabin = _hub(
+            "tab.hub.cabin",
+            "🎵 Cabin Live",
+            [(cabin_soundboard_tab, "tab.cabin_live", "🎵 Cabin Live")],
+        )
+        self._hub_ix_crew = _hub(
+            "tab.hub.crew",
+            "👥 Crew & Personal",
+            [(crew_tab, "tab.crew", "👥 Crew & Personal")],
+        )
+        self._hub_ix_bank = _hub(
+            "tab.hub.bank",
+            "🏦 SkyTycoon Zentralbank",
+            [
+                (bank_tab, "hub.bank.loans", "💰 Kreditanstalt"),
+            ],
+        )
+
+        self._main_tab_i18n = [
+            ("tab.hub.career", tabs.widget(self._hub_ix_career), "👤 Karriere & Allianz"),
+            (
+                "tab.hub.dispatch",
+                tabs.widget(self._hub_ix_dispatch),
+                "✈️ Flugbörse & Dispatcher",
+            ),
+            (
+                "tab.hub.hangar",
+                tabs.widget(self._hub_ix_hangar),
+                "🛩️ Hangar, Werft & Crafting",
+            ),
+            ("tab.hub.cabin", tabs.widget(self._hub_ix_cabin), "🎵 Cabin Live"),
+            ("tab.hub.crew", tabs.widget(self._hub_ix_crew), "👥 Crew & Personal"),
+            (
+                "tab.hub.bank",
+                tabs.widget(self._hub_ix_bank),
+                "🏦 SkyTycoon Zentralbank",
+            ),
+        ]
+        self._tab_ix_flight = self._hub_ix_dispatch
+        self._tab_ix_hangar = self._hub_ix_hangar
+        self._tab_ix_bank = self._hub_ix_bank
+        self._tab_ix_profile = self._hub_ix_career
+        self._tab_ix_alliances = self._hub_ix_career
+        self._tab_ix_blackbox = self._hub_ix_dispatch
+        self._tab_ix_fids = self._hub_ix_dispatch
+        self._tab_ix_acars = self._hub_ix_dispatch
+        self._hub_leaf_bank = bank_tab
+        self._hub_leaf_hangar = hangar_tab
+        self._hub_leaf_profile = profile_tab
+        self._hub_leaf_alliances = alliances_tab
+        self._hub_leaf_blackbox = blackbox_tab
+        self._hub_leaf_fids = fids_tab
+        self._hub_leaf_acars = acars_tab
+
+    def _hub_inner_current_is(self, hub_ix: int, leaf: QWidget) -> bool:
+        if self.tab_widget.currentIndex() != hub_ix:
+            return False
+        inner = self._hub_tabwidgets.get(hub_ix)
+        return inner is not None and inner.currentWidget() is leaf
+
+    def _on_hub_inner_tab_changed(self, hub_ix: int) -> None:
+        self._on_main_tab_changed(hub_ix)
+
+    def _inject_hangar_scrapyard_subtab(self) -> None:
+
+=== line 2662 old_string (snippet) ===
+        self._install_six_main_hub_tabs(
+            tabs,
+            career=career,
+            market=market,
+            hangar_tab=hangar_tab,
+            bank_tab=bank_tab,
+            job_tab=job_tab,
+            flight_tab=flight_tab,
+            gsx_tab=gsx_tab,
+            cabin_soundboard_tab=cabin_soundboard_tab,
+            profile_tab=profile_tab,
+            crew_tab=crew_tab,
+            efb_tab=efb_tab,
+            alliances_tab=self.tab_alliances,
+            blackbox_tab=self.tab_blackbox,
+            fids_tab=self.tab_fids_board,
+            acars_tab=self.tab_acars,
+        )
+
+=== line 2662 old_string ===
+    def _install_six_main_hub_tabs(
+        self,
+        tabs: QTabWidget,
+        *,
+        career: QWidget,
+        market: QWidget,
+        hangar_tab: QWidget,
+        bank_tab: QWidget,
+        job_tab: QWidget,
+        flight_tab: QWidget,
+        gsx_tab: QWidget,
+        cabin_soundboard_tab: QWidget,
+        profile_tab: QWidget,
+        crew_tab: QWidget,
+        efb_tab: QWidget,
+        alliances_tab: QWidget,
+        blackbox_tab: QWidget,
+        fids_tab: QWidget,
+        acars_tab: QWidget,
+    ) -> None:
+        """70-Säulen-Hub: 6 Hauptreiter mit Unter-Tabs (kein Tab-Spam)."""
+        self._hub_tabwidgets: dict[int, QTabWidget] = {}
+        self._hub_sub_i18n: list[tuple[QTabWidget, int, str, str]] = []
+
+        def _hub(
+            hub_key: str,
+            hub_default: str,
+            subtabs: list[tuple[QWidget, str, str]],
+            header: QWidget | None = None,
+        ) -> int:
+            host = QWidget()
+            lay = QVBoxLayout(host)
+            lay.setContentsMargins(4, 4, 4, 4)
+            if header is not None:
+                lay.addWidget(header)
+            inner = QTabWidget()
+            for widget, sk, sd in subtabs:
+                ti = inner.count()
+                inner.addTab(widget, self._tr(sk, sd))
+                self._hub_sub_i18n.append((inner, ti, sk, sd))
+            lay.addWidget(inner, 1)
+            ix = tabs.addTab(host, self._tr(hub_key, hub_default))
+            self._hub_tabwidgets[ix] = inner
+            inner.currentChanged.connect(
+                lambda _i, hub_ix=ix: self._on_hub_inner_tab_changed(hub_ix)
+            )
+            return ix
+
+        hub1_header = QLabel(
+            self._tr(
+                "hub.career.header",
+                "Pilot · Swiss-Allianz · IONOS-Netzwerk — Status im Karriere-Dashboard.",
+            )
+        )
+        hub1_header.setWordWrap(True)
+        hub1_header.setStyleSheet("color:#cfd8dc;font-size:12px;padding:4px;")
+        self._i18n_register(
+            hub1_header,
+            "hub.career.header",
+            "Pilot · Swiss-Allianz · IONOS-Netzwerk — Status im Karriere-Dashboard.",
+        )
+
+        prestige_tab = QWidget()
+        prest_l = QVBoxLayout(prestige_tab)
+        prest_info = QLabel(
+            self._tr(
+                "hub.career.prestige_hint",
+                "Prestige-Reset & Endgame: Web-Karriere-Verwaltung (25-€-Lizenz bleibt geschützt).",
+            )
+        )
+        prest_info.setWordWrap(True)
+        self._i18n_register(
+            prest_info,
+            "hub.career.prestige_hint",
+            "Prestige-Reset & Endgame: Web-Karriere-Verwaltung (25-€-Lizenz bleibt geschützt).",
+        )
+        prest_l.addWidget(prest_info)
+        btn_prestige = QPushButton(
+            self._tr("hub.career.prestige_open", "🔄 Prestige-Reset im Browser öffnen")
+        )
+        self._i18n_register(
+            btn_prestige,
+            "hub.career.prestige_open",
+            "🔄 Prestige-Reset im Browser öffnen",
+        )
+        btn_prestige.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://skytycoon.info/player/career_backup")
+            )
+        )
+        prest_l.addWidget(btn_prestige)
+        prest_l.addStretch()
+
+        dispatch_header = QWidget()
+        dh_l = QVBoxLayout(dispatch_header)
+        dh_l.setContentsMargins(0, 0, 0, 0)
+        if hasattr(self, "btn_open_dispatch_center"):
+            dh_l.addWidget(self.btn_open_dispatch_center)
+
+        events_tab = QWidget()
+        ev_l = QVBoxLayout(events_tab)
+        ev_intro = QLabel(
+            self._tr(
+                "hub.dispatch.events_intro",
+                "Krisen- & Eventradar: globale Wetter- und Event-Übersicht (Web, neuer Tab).",
+            )
+        )
+        ev_intro.setWordWrap(True)
+        self._i18n_register(
+            ev_intro,
+            "hub.dispatch.events_intro",
+            "Krisen- & Eventradar: globale Wetter- und Event-Übersicht (Web, neuer Tab).",
+        )
+        ev_l.addWidget(ev_intro)
+        btn_events = QPushButton(
+            self._tr("hub.dispatch.events_open", "🌦️ Eventradar öffnen")
+        )
+        self._i18n_register(
+            btn_events, "hub.dispatch.events_open", "🌦️ Eventradar öffnen"
+        )
+        btn_events.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://skytycoon.info/market/weather")
+            )
+        )
+        ev_l.addWidget(btn_events)
+        btn_radar = QPushButton(
+            self._tr("hub.dispatch.radar_open", "📡 Live-Radar öffnen")
+        )
+        self._i18n_register(
+            btn_radar, "hub.dispatch.radar_open", "📡 Live-Radar öffnen"
+        )
+        btn_radar.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://skytycoon.info/market/radar"))
+        )
+        ev_l.addWidget(btn_radar)
+        ev_l.addStretch()
+
+        self._hub_ix_career = _hub(
+            "tab.hub.career",
+            "👤 Karriere & Allianz",
+            [
+                (career, "hub.career.stats", "📊 Statistik & 20 Ränge"),
+                (alliances_tab, "hub.career.alliance", "🏢 Allianz-Krieg"),
+                (prestige_tab, "hub.career.prestige", "🔄 Prestige-Reset"),
+                (profile_tab, "hub.career.profile", "👤 Pilotenprofil"),
+            ],
+            header=hub1_header,
+        )
+        self._hub_ix_dispatch = _hub(
+            "tab.hub.dispatch",
+            "✈️ Flugbörse & Dispatcher",
+            [
+                (job_tab, "hub.dispatch.jobs", "📋 Vorgefertigte Jobs"),
+                (flight_tab, "hub.dispatch.flight", "✈️ Aktueller Flug"),
+                (gsx_tab, "hub.dispatch.gsx", "🛫 GSX Abfertigung"),
+                (events_tab, "hub.dispatch.events", "🌦️ Krisen- & Eventradar"),
+                (fids_tab, "hub.dispatch.fids", "📡 Live-Flugtafel (FIDS)"),
+                (blackbox_tab, "hub.dispatch.blackbox", "🛩️ Blackbox"),
+                (acars_tab, "hub.dispatch.acars", "📡 ACARS-Funk"),
+                (efb_tab, "hub.dispatch.efb", "📱 EFB-Tablet"),
+            ],
+            header=dispatch_header,
+        )
+        self._hub_ix_hangar = _hub(
+            "tab.hub.hangar",
+            "🛩️ Hangar, Werft & Crafting",
+            [
+                (hangar_tab, "hub.hangar.fleet", "✈️ Flottenliste"),
+                (market, "hub.hangar.market", "🛒 Flugzeug-Marktplatz"),
+            ],
+        )
+        self._hub_ix_cabin = _hub(
+            "tab.hub.cabin",
+            "🎵 Cabin Live",
+            [(cabin_soundboard_tab, "tab.cabin_live", "🎵 Cabin Live")],
+        )
+        self._hub_ix_crew = _hub(
+            "tab.hub.crew",
+            "👥 Crew & Personal",
+            [(crew_tab, "tab.crew", "👥 Crew & Personal")],
+        )
+        fuel_trade_tab = QWidget()
+        ft_l = QVBoxLayout(fuel_trade_tab)
+        ft_info = QLabel(
+            self._tr(
+                "hub.bank.fuel_intro",
+                "Kerosin bunkern: Postgres-Tank, Limit-Balken und Ausbaustufen im Web-Markt.",
+            )
+        )
+        ft_info.setWordWrap(True)
+        self._i18n_register(
+            ft_info,
+            "hub.bank.fuel_intro",
+            "Kerosin bunkern: Postgres-Tank, Limit-Balken und Ausbaustufen im Web-Markt.",
+        )
+        ft_l.addWidget(ft_info)
+        btn_fuel = QPushButton(
+            self._tr("hub.bank.fuel_open", "⛽ Kerosin-Trading öffnen")
+        )
+        self._i18n_register(
+            btn_fuel, "hub.bank.fuel_open", "⛽ Kerosin-Trading öffnen"
+        )
+        btn_fuel.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://skytycoon.info/market/fuel_market")
+            )
+        )
+        ft_l.addWidget(btn_fuel)
+        ft_l.addStretch()
+
+        self._hub_ix_bank = _hub(
+            "tab.hub.bank",
+            "🏦 SkyTycoon Zentralbank",
+            [
+                (bank_tab, "hub.bank.loans", "💰 Kreditanstalt"),
+                (fuel_trade_tab, "hub.bank.fuel", "⛽ Kerosin-Trading"),
+            ],
+        )
+
+        self._main_tab_i18n = [
+            ("tab.hub.career", tabs.widget(self._hub_ix_career), "👤 Karriere & Allianz"),
+            (
+                "tab.hub.dispatch",
+                tabs.widget(self._hub_ix_dispatch),
+                "✈️ Flugbörse & Dispatcher",
+            ),
+            (
+                "tab.hub.hangar",
+                tabs.widget(self._hub_ix_hangar),
+                "🛩️ Hangar, Werft & Crafting",
+            ),
+            ("tab.hub.cabin", tabs.widget(self._hub_ix_cabin), "🎵 Cabin Live"),
+            ("tab.hub.crew", tabs.widget(self._hub_ix_crew), "👥 Crew & Personal"),
+            (
+                "tab.hub.bank",
+                tabs.widget(self._hub_ix_bank),
+                "🏦 SkyTycoon Zentralbank",
+            ),
+        ]
+        self._tab_ix_flight = self._hub_ix_dispatch
+        self._tab_ix_hangar = self._hub_ix_hangar
+        self._tab_ix_bank = self._hub_ix_bank
+        self._tab_ix_profile = self._hub_ix_career
+        self._tab_ix_alliances = self._hub_ix_career
+        self._tab_ix_blackbox = self._hub_ix_dispatch
+        self._tab_ix_fids = self._hub_ix_dispatch
+        self._tab_ix_acars = self._hub_ix_dispatch
+        self._hub_leaf_bank = bank_tab
+        self._hub_leaf_hangar = hangar_tab
+        self._hub_leaf_profile = profile_tab
+        self._hub_leaf_alliances = alliances_tab
+        self._hub_leaf_blackbox = blackbox_tab
+        self._hub_leaf_fids = fids_tab
+        self._hub_leaf_acars = acars_tab
+
+    def _hub_inner_current_is(self, hub_ix: int, leaf: QWidget) -> bool:
+        if self.tab_widget.currentIndex() != hub_ix:
+            return False
+        inner = self._hub_tabwidgets.get(hub_ix)
+        return inner is not None and inner.currentWidget() is leaf
+
+    def _on_hub_inner_tab_changed(self, hub_ix: int) -> None:
+        self._on_main_tab_changed(hub_ix)

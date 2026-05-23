@@ -1,0 +1,25 @@
+line 2648 old_string len=1087
+
+        job_tab = QWidget()
+        job_root = QVBoxLayout(job_tab)
+        job_root.setContentsMargins(4, 4, 4, 4)
+        job_root.setSpacing(6)
+        self.job_board_tabs = QTabWidget()
+        self.job_board_tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self.job_board_tabs.addTab(QWidget(), "Passagier-Service")
+        self.job_board_tabs.addTab(QWidget(), "Air Cargo")
+        self.job_board_tabs.addTab(QWidget(), "Hub / VIP (+50 %)")
+        self.job_board_tabs.addTab(QWidget(), self._tr("job.tab.local", "Lokale Aufträge"))
+        self.job_board_tabs.addTab(
+            QWidget(),
+            self._tr("job.tab.active_dispatch", "Aktive Aufträge"),
+        )
+        self.job_board_tabs.addTab(
+            QWidget(),
+            self._tr("job.tab.charter", "✈️ Freie Charter-Flüge"),
+        )
+        self.job_board_tabs.addTab(QWidget(), self._tr("job.tab.all", "Alle Aufträge"))
+        self.job_board_tabs.currentChanged.connect(self._on_job_board_tab_changed)
+        self._stack_job_board = QStackedWidget()

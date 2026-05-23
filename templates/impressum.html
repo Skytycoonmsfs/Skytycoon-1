@@ -1,0 +1,21 @@
+{% extends "base.html" %}{% block title %}{{ t.page_impressum_title }}{% endblock %}
+{% block body %}
+<article class="legal-doc">
+<h1>{{ t.page_impressum_title }}</h1>
+{% if lang == 'de' %}
+<p><strong>Angaben gemäß § 5 TMG (bzw. § 55 RStV)</strong></p>
+<p><strong>Diensteanbieter / Medieninhaber:</strong><br/>SkyTycoon Pro (Einzelperson / Einzelunternehmer im Sinne der gewählten Rechtsform)</p>
+<p><strong>Postanschrift:</strong><br/>Bitte setzen Sie hier Ihre ladungsfähige Adresse (Name, Straße, PLZ, Ort, Land). Bis zur Veröffentlichung der finalen Anschrift erreichen Sie uns ausschließlich per E-Mail.</p>
+<p><strong>Kontakt:</strong><br/>E-Mail: <a href="mailto:info@skytycoon.info">info@skytycoon.info</a></p>
+<p><strong>Verantwortlich für den Inhalt nach § 55 Abs. 2 RStV:</strong><br/>wie oben (Anschrift folgt)</p>
+<p><strong>Haftung für Inhalte:</strong> Als Diensteanbieter sind wir gemäß § 7 Abs.1 TMG für eigene Inhalte auf diesen Seiten nach den allgemeinen Gesetzen verantwortlich. Nach §§ 8 bis 10 TMG sind wir als Diensteanbieter jedoch nicht verpflichtet, übermittelte oder gespeicherte fremde Informationen zu überwachen oder nach Umständen zu forschen, die auf eine rechtswidrige Tätigkeit hinweisen.</p>
+<p><strong>Haftung für Links:</strong> Unser Angebot enthält Links zu externen Websites Dritter, auf deren Inhalte wir keinen Einfluss haben. Für die Inhalte der verlinkten Seiten ist stets der jeweilige Anbieter verantwortlich.</p>
+{% else %}
+<p><strong>Information provided in accordance with applicable transparency rules (EU / Germany)</strong></p>
+<p><strong>Service provider:</strong><br/>SkyTycoon Pro (sole proprietor / individual publisher as applicable)</p>
+<p><strong>Postal address:</strong><br/>Please add your full legal address here (name, street, postal code, city, country). Until published, contact is by email only.</p>
+<p><strong>Contact:</strong><br/>Email: <a href="mailto:info@skytycoon.info">info@skytycoon.info</a></p>
+<p><strong>Liability for content:</strong> We make every effort to keep the information on this site accurate but assume no liability for external links; the respective operators are responsible for their content.</p>
+{% endif %}
+</article>
+{% endblock %}

@@ -1,0 +1,19 @@
+{
+  "dependencies": [],
+  "content_type": "AIRCRAFT",
+  "title": "SkyTycoon FBW A32NX EFB Override",
+  "version": "1.0.0",
+  "package_version": "1.0.0",
+  "creator": "SkyTycoon Suite",
+  "manufacturer": "Software-Imperium",
+  "description": "Overrides FlyByWire A320neo VCockpit16 (EFB) to SkyTycoon Cockpit EFB. Requires flybywire-aircraft-a320-neo and skytycoon-efb-cockpit. Load order: after FBW (package name zzz-…).",
+  "minimum_game_version": "1.32.0",
+  "minimum_compatibility_version": "1.32.0",
+  "release_notes": {
+    "neutral": {
+      "Language": "en-US",
+      "Title": "SkyTycoon FBW EFB",
+      "Description": "Replaces flyPad glass with SkyTycoon live dashboard."
+    }
+  }
+}

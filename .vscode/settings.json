@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^powershell -NoProfile -Command \"Set-Location 'c:\\\\Users\\\\schmi\\\\Desktop\\\\Neuer Ordner \\(2\\)\\\\skytycoonmobile'; flutter pub get\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

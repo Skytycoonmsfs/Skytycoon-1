@@ -1,0 +1,12 @@
+FEHLENDE — Stand 2026-05-20 (fehler4-v8)
+
+[OK] login_widget -> PlatinLoginOverlay + win.login_widget
+[OK] Patrick.S -> server auth/login Repair vor HWID-403
+[OK] CDN WAV 56 Dateien + QSoundEffect
+[OK] dist\main.exe neu gebaut (PyInstaller 6.19)
+[OK] Bank-Hub umbenannt (Extensions)
+[FROZEN] EFB nur als Dialog in main.py
+
+Pilot testen: python main.py oder dist\main.exe
+
+Siehe fehler4.txt

@@ -1,0 +1,16 @@
+{
+  "_deprecated": "Firebase RTDB is legacy. Use IONOS API (https://skytycoon.info) for P2P, config, and bans.",
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "market": {
+      "listings": {
+        ".read": true,
+        "$listingId": {
+          ".write": "auth != null && newData.child('sellerHardwareId').val() === auth.token.hardware_id",
+          ".validate": "newData.hasChildren(['model', 'price', 'sellerHardwareId']) && newData.child('price').isNumber() && newData.child('price').val() >= 100 && newData.child('price').val() <= 500000000"
+        }
+      }
+    }
+  }
+}

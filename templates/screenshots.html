@@ -1,0 +1,14 @@
+{% extends "base.html" %}{% block title %}{{ t.page_screenshots_title }}{% endblock %}
+{% block body %}
+<div class="hero" style="padding-bottom:8px;">
+<h2>{{ t.page_screenshots_title }}</h2>
+<p>{{ t.shots_intro }}</p>
+<p style="color:#90a4ae;font-size:14px;margin-top:1rem;">
+{% if lang == 'en' %}
+Gallery images are being refreshed — new screenshots will appear here soon.
+{% else %}
+Die Galerie wird aktualisiert — neue Screenshots folgen in Kürze.
+{% endif %}
+</p>
+</div>
+{% endblock %}

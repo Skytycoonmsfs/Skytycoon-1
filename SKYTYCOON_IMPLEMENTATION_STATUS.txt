@@ -1,0 +1,31 @@
+SkyTycoon Pro – Implementierungs- / Gap-Liste (Stand: Meilenstein 140/141 Umsetzung)
+===================================================================================
+
+ERLEDIGT IN DIESEM SCHWUNG (Kurz)
+---------------------------------
+- Cockpit EFB In-Texture: Paket skytycoon-efb-cockpit (Instrument skytycoon-cockpit-efb, aircraft-patches, tools/install_efb_cockpit_to_msfs.py)
+- MainWindow.language_changed Signal (Fix Startup-Crash bei _apply_ui_language)
+- MSFS Native: Hauptmenü-Hook (SkyTycoonMenuLink.js), Vollbild-Panel, syncSkyTycoonFlightToMsfsPlanner (Coherent SET_DEPARTURE/ARRIVAL/PAYLOAD)
+- MSFS Pro: Msfs3DTrafficInjector (Radar /api/v1/web/radar/positions, 50 NM, AICreateNonATCAircraft)
+- Cloud-Persistenz: POST/GET /api/v1/aircraft/save_state + load_state (Treibstoff, Gate)
+- Auto-Unlock bei has_license==1: 3D-Traffic + Persistenz ohne DRM-Umweg; sync_profile liefert scrapyard + traffic_3d_peers
+- retranslate_all_ui_elements() Alias; neue i18n-Keys msfs.* / fuel.leg_* / profile.premium_license_ok
+- M140: Bank-Tab mit Unterreitern „Übersicht“ / „Immobilien-Makler“; Tabelle aus airline_branches; Detail-Panel; Überführung (Credits, nur am Boden, write_persisted_aircraft_stand); IONOS GET/POST branches/list + branches/sync; Cloud-Abgleich beim Öffnen des Makler-Reiters; i18n-Keys broker.* + bank.sub.*
+- M141: force_absolute_logo_render + QTimer.singleShot(500) nach MainWindow.show (execute_hard_branding_refresh direkt beim Start entfernt)
+- last_visit_ts: touch_branch_last_visit nach Flugabschluss (route_to)
+- total_invested_credits: bei Büroeröffnung und Upgrade; Backfill für alte Saves
+
+NOCH OFFEN / TEILWEISE / VERBESSERUNGSWÜRDIG
+--------------------------------------------
+1) Harte deutsche Texte in Legacy-Pfaden (z. B. open_airline_branch-Fehlermeldungen, SimConnect-Labels, Teile von _poll_simconnect) – nicht auf translations.json umgestellt.
+2) IONOS-Server: Nutzer-Auth ist Passwort-Klartext in SQLite; keine TLS-/Token-Pflicht im Stub; branches_json wird nur clientseitig interpretiert – keine Signatur/Versionierung.
+3) Cloud-Abgleich vergleicht nur ICAO→Level; Felder invested/last_visit werden in sync mitgeschickt, aber nicht in der Gleichheitsprüfung genutzt.
+4) Überführungsflug: keine append_flight_log-Zeile, kein separater Buchungssatz in einer Accounting-Tabelle; nur Credits + Meta-Stand.
+5) Immobilien-Makler: Kein automatischer Pull aus der Cloud in die lokale DB (nur Verifikation + manueller Push-Button).
+6) KI accepted_jobs / HR / Multiplayer: je nach Roadmap ggf. nur Stubs oder Demo-Daten.
+7) PyInstaller: force_absolute_logo_render nutzt assets/logos unter _MEIPASS – Bundle-Manifest muss Logos enthalten; sonst nur Fallback „✈“.
+8) execute_hard_branding_refresh vs. force_absolute_logo_render: zwei Pfade (Download/Branding vs. absoluter Pfad); Doppelklick/Wizard kann weiter execute_hard nutzen – konsolidieren wäre optional.
+9) Admin_Commander.py / Remote-Admin: nicht Teil dieses Schwungs; ggf. branches_json dort noch nicht sichtbar.
+10) Tests: keine automatisierten Tests für neue API-Endpunkte oder Makler-UI.
+
+Hinweis: Diese Liste ist bewusst breit („ganzes System“); Priorität klären Sie mit Ihrer Roadmap.

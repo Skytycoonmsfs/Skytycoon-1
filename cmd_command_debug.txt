@@ -1,0 +1,2 @@
+'cd /d "c:\\Users\\schmi\\Desktop\\Neuer Ordner (2)\\skytycoonmobile"'
+cd /d "c:\Users\schmi\Desktop\Neuer Ordner (2)\skytycoonmobile"

@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}{% if lang == "de" %}Premium-Wetter{% else %}Premium Weather{% endif %}{% endblock %}
+{% block body %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+.stwx-wrap{max-width:1200px;margin:0 auto;padding:24px 16px;color:#e3e7ed;}
+.stwx-banner{background:linear-gradient(135deg,#0d2818,#1a3a2a);border:2px solid #00c853;border-radius:12px;padding:16px 20px;margin-bottom:16px;}
+.stwx-banner h2{margin:0 0 8px;color:#69f0ae;font-size:1.25rem;}
+.stwx-status{color:#b9f6ca;font-weight:700;font-size:14px;}
+.stwx-map{height:560px;border-radius:10px;border:2px solid #2a3545;}
+.stwx-legend{margin-top:12px;display:flex;flex-wrap:wrap;gap:12px;font-size:13px;color:#90a4ae;}
+.stwx-legend span{display:inline-flex;align-items:center;gap:6px;}
+.stwx-dot{width:14px;height:14px;border-radius:3px;display:inline-block;}
+.crisis-pulse{animation:crisisPulse 1.6s ease-in-out infinite;}
+@keyframes crisisPulse{0%,100%{opacity:.45;stroke-width:2;}50%{opacity:.92;stroke-width:4;}}
+</style>
+<section class="stwx-wrap">
+  <div class="stwx-banner">
+    <h2>🌦️ {% if lang == "de" %}Krisen- &amp; Wetter-Radar{% else %}Crisis &amp; weather radar{% endif %}</h2>
+    <p class="stwx-status">🟢 {% if lang == "de" %}Live-Overlay: Regen, Sturm &amp; aktive Krisen-Zonen (Schnee, Taifun, Asche){% else %}Live overlay: rain, storms &amp; active crisis zones (snow, typhoon, ash){% endif %}</p>
+    <p style="margin:8px 0 0;color:#90a4ae;font-size:13px;">{% if lang == "de" %}Rote Pulse markieren betroffene ICAO-Flughäfen — Daten aus PostgreSQL global_crisis_events.{% else %}Red pulses mark affected ICAO airports — data from PostgreSQL global_crisis_events.{% endif %}</p>
+  </div>
+  <div id="stwx-map" class="stwx-map"></div>
+  <div class="stwx-legend">
+    <span><i class="stwx-dot" style="background:#4fc3f7;"></i> {% if lang == "de" %}Niederschlag{% else %}Precipitation{% endif %}</span>
+    <span><i class="stwx-dot" style="background:#ff1744;"></i> {% if lang == "de" %}Krisen-Zone (puls){% else %}Crisis zone (pulse){% endif %}</span>
+  </div>
+</section>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function(){
+  var map=L.map('stwx-map',{zoomControl:true}).setView([50.1,10.4],5);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{subdomains:'abcd',maxZoom:18,attribution:'&copy; CARTO'}).addTo(map);
+  var rainLayer=null, stormLayer=null, crisisLayers=[];
+  function loadRainViewer(){
+    fetch('https://api.rainviewer.com/public/weather-maps.json').then(function(r){return r.json();}).then(function(j){
+      var past=(j&&j.radar&&j.radar.past)||[];
+      if(!past.length)return;
+      var ts=past[past.length-1].path;
+      if(rainLayer){map.removeLayer(rainLayer);}
+      rainLayer=L.tileLayer('https://tilecache.rainviewer.com'+ts+'/256/{z}/{x}/{y}/2/1_1.png',{opacity:0.65,maxZoom:12});
+      rainLayer.addTo(map);
+      if(stormLayer){map.removeLayer(stormLayer);}
+      stormLayer=L.tileLayer('https://tilecache.rainviewer.com'+ts+'/256/{z}/{x}/{y}/8/1_1.png',{opacity:0.45,maxZoom:12});
+      stormLayer.addTo(map);
+    }).catch(function(){});
+  }
+  function loadCrises(){
+    fetch('/api/v1/crisis/active').then(function(r){return r.json();}).then(function(j){
+      crisisLayers.forEach(function(c){map.removeLayer(c);});
+      crisisLayers=[];
+      if(!j||!j.ok||!j.events)return;
+      j.events.forEach(function(ev){
+        if(!ev.lat||!ev.lon)return;
+        var rad=(ev.radius_km||80)*1000;
+        var c=L.circle([ev.lat,ev.lon],{radius:rad,color:'#ff1744',fillColor:'#ff1744',fillOpacity:0.28,weight:2,className:'crisis-pulse'});
+        c.bindPopup('<b>'+(ev.title_de||ev.crisis_type)+'</b><br>ICAO '+ev.airport_icao);
+        c.addTo(map);
+        crisisLayers.push(c);
+      });
+    }).catch(function(){});
+  }
+  loadRainViewer();
+  loadCrises();
+  setInterval(loadRainViewer,300000);
+  setInterval(loadCrises,60000);
+})();
+</script>
+{% endblock %}

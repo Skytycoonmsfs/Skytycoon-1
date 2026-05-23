@@ -1,0 +1,17 @@
+        act_btns.addWidget(self.btn_active_job_edit)
+        act_btns.addStretch()
+        pa_l.addWidget(self.table_active_dispatch)
+        pa_l.addLayout(act_btns)
+        self._stack_job_board.addWidget(page_market)
+        self._stack_job_board.addWidget(page_active)
+        job_root.addWidget(self._stack_job_board)
+        try:
+            raw_sz = app_meta_get(DB_PATH, "ui_job_board_split_sizes", "") or ""
+            arr = json.loads(raw_sz) if raw_sz.strip() else []
+            if isinstance(arr, list) and len(arr) == 2:
+                a = int(float(arr[0]))
+                b = int(float(arr[1]))
+                if a >= 80 and b >= 80:
+                    split_jobs.setSizes([a, b])
+        except (json.JSONDecodeError, TypeError, ValueError, OSError):
+            pass

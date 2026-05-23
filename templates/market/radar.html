@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}{% if lang == "de" %}Live-Radar{% else %}Live Radar{% endif %}{% endblock %}
+{% block body %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+.srdx-wrap{max-width:1200px;margin:0 auto;padding:24px 16px;color:#e3e7ed;}
+.srdx-banner{background:#12161f;border:2px solid #d4af37;border-radius:12px;padding:14px 18px;margin-bottom:14px;}
+.srdx-map{height:560px;border-radius:10px;border:2px solid #2a3545;}
+</style>
+<section class="srdx-wrap">
+  <div class="srdx-banner">
+    <h2 style="margin:0;color:#d4af37;">📡 {% if lang == "de" %}Live-Radar — Welt-Flugtafel{% else %}Live radar — world flight board{% endif %}</h2>
+    <p style="margin:8px 0 0;color:#90a4ae;font-size:13px;">{% if lang == "de" %}Piloten-Positionen alle 15 Sekunden (MSFS / SkyTycoon Cloud).{% else %}Pilot positions every 15 seconds (MSFS / SkyTycoon cloud).{% endif %}</p>
+  </div>
+  <div id="srdx-map" class="srdx-map"></div>
+</section>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function(){
+  var map=L.map('srdx-map').setView([50,10],4);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{subdomains:'abcd',maxZoom:18}).addTo(map);
+  var layer=L.layerGroup().addTo(map);
+  var gold='#ffd54f';
+  function tick(){
+    fetch('/api/v1/radar/live').then(function(r){return r.json();}).then(function(d){
+      layer.clearLayers();
+      var ps=(d&&d.pilots)||[];
+      ps.forEach(function(p){
+        var la=parseFloat(p.lat), lo=parseFloat(p.lng||p.lon);
+        if(!la||!lo)return;
+        var m=L.circleMarker([la,lo],{radius:7,color:gold,fillColor:gold,fillOpacity:0.85,weight:2});
+        m.bindPopup('<b>'+(p.pilot_name||p.username||'?')+'</b><br/>'+(p.route||'')+'<br/>'+(p.aircraft||''));
+        layer.addLayer(m);
+      });
+    }).catch(function(){});
+  }
+  tick();
+  setInterval(tick,15000);
+})();
+</script>
+{% endblock %}

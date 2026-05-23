@@ -1,0 +1,4 @@
+    def _on_job_board_tab_changed(self, index: int) -> None:
+        if hasattr(self, "_stack_job_board"):
+            self._stack_job_board.setCurrentIndex(1 if index == 4 else 0)
+        if index == 1:

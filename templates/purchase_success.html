@@ -1,0 +1,16 @@
+{% extends "base.html" %}{% block title %}{{ t.pay_ok_title }}{% endblock %}
+{% block body %}
+<div class="form" style="max-width:640px;text-align:center;">
+{% if error %}
+<h2 style="margin-top:0;color:#ef9a9a;">{{ t.pay_ok_title }}</h2>
+<p style="color:var(--muted);">{{ error }}</p>
+<p><a href="/login">{{ t.nav_account }}</a> · <a href="/register">{{ t.nav_register }}</a></p>
+{% else %}
+<h2 style="margin-top:0;color:#81c784;">{{ t.pay_ok_h2 }}</h2>
+<p style="color:var(--muted);line-height:1.5;">{{ t.pay_ok_intro }}</p>
+{% if buyer_email %}<p style="font-size:14px;color:var(--muted);">{{ buyer_email }}</p>{% endif %}
+{% if paypal_order_id %}<p style="font-size:13px;color:#90a4ae;">{{ t.pay_ok_order }} <code style="color:#b0bec5;">{{ paypal_order_id }}</code></p>{% endif %}
+<div class="success-key" style="margin:20px 0;font-size:1.1rem;word-break:break-all;">{{ license_key }}</div>
+<p><a href="/register">{{ t.pay_ok_register }}</a></p>
+{% endif %}
+</div>{% endblock %}

@@ -1,0 +1,72 @@
+{% extends "base.html" %}{% block title %}Credit-Marktplatz · SkyTycoon{% endblock %}
+{% block body %}
+<style>
+.m216{background:#05070a;color:#e3e7ed;max-width:960px;margin:0 auto;padding:32px 16px 48px;}
+.m216 h2{color:#d4af37;font-weight:800;letter-spacing:.06em;}
+.m216-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:24px;}
+.m216-card{background:#12161f;border:1px solid #2a3545;border-radius:10px;padding:18px;}
+.m216-owned{border-color:#00ff66;}
+.m216-btn{background:#d4af37;color:#000;border:0;padding:10px 16px;font-weight:700;border-radius:6px;cursor:pointer;width:100%;margin-top:10px;}
+.m216-btn:disabled{opacity:.4;cursor:not-allowed;}
+</style>
+<section class="m216">
+  <h2>🛒 {% if lang == 'de' %}Credit-Marktplatz (Module 1–14){% else %}Credit marketplace (modules 1–14){% endif %}</h2>
+  <p style="color:#90a4ae;">{% if lang == 'de' %}Kontostand:{% else %}Balance:{% endif %} <strong style="color:#00ff66;">{{ "%.0f"|format(pilot_credits) }} CR</strong></p>
+  <p style="color:#78909c;font-size:13px;">{% if lang == 'de' %}Das 25-€-Hauptspiel bleibt per PayPal — Zusatzmodule nur per In-Game-Credits.{% else %}Main game stays PayPal — add-ons unlock with in-game credits only.{% endif %}</p>
+  <div class="m216-grid">
+    {% for mod in catalog %}
+    <div class="m216-card{% if mod.owned %} m216-owned{% endif %}">
+      <h3 style="margin:0 0 8px;color:#64b5f6;">{{ mod.title }}</h3>
+      <p style="margin:0;color:#90a4ae;font-size:13px;">{{ mod.credits|int }} CR</p>
+      {% if mod.owned %}
+      <p style="color:#00ff66;font-weight:700;margin-top:12px;">✓ {% if lang == 'de' %}Freigeschaltet{% else %}Unlocked{% endif %}</p>
+      <a href="{{ mod.path }}" target="_blank" rel="noopener" class="m216-btn" style="display:block;text-align:center;text-decoration:none;">{% if lang == 'de' %}Modul öffnen{% else %}Open module{% endif %}</a>
+      {% else %}
+      <button type="button" class="m216-btn" data-module="{{ mod.key }}">{% if lang == 'de' %}Mit Credits kaufen{% else %}Buy with credits{% endif %}</button>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<script>
+var SHOP_LANG = '{{ lang|default("de") }}';
+function shopSwalInsufficientCredits() {
+  if (SHOP_LANG === 'en') {
+    return Swal.fire({
+      icon: 'warning',
+      title: '❌ Insufficient Credits!',
+      text: 'Captain, your balance is insufficient to unlock this module. Earn the required credits by accepting new charter jobs in your live flight market and completing them successfully!',
+      confirmButtonColor: '#d4af37'
+    });
+  }
+  return Swal.fire({
+    icon: 'warning',
+    title: '❌ Unzureichendes Guthaben!',
+    text: 'Kapitän, dein Kontostand reicht nicht aus, um dieses Modul freizuschalten. Verdiene die benötigten Credits, indem du neue Charter-Aufträge in deiner Live-Flugbörse annimmst und erfolgreich abfliegst!',
+    confirmButtonColor: '#d4af37'
+  });
+}
+document.querySelectorAll('.m216-btn[data-module]').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    var key = btn.getAttribute('data-module');
+    btn.disabled = true;
+    fetch('/api/v1/licenses/buy', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify({module_key: key})
+    }).then(function(r){ return r.json(); }).then(function(d){
+      if (d.status === 'success') location.reload();
+      else {
+        var err = (d.message || '').toLowerCase();
+        if (err.indexOf('insufficient') >= 0) shopSwalInsufficientCredits();
+        else if (typeof Swal !== 'undefined') Swal.fire({ icon: 'error', text: d.message || 'Error' });
+        else alert(d.message || 'Error');
+        btn.disabled = false;
+      }
+    }).catch(function(){ btn.disabled = false; });
+  });
+});
+</script>
+{% endblock %}

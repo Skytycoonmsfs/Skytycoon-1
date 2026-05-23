@@ -1,0 +1,84 @@
+{% extends "base.html" %}{% block title %}{% if lang == 'de' %}Tages-Auktionen · SkyTycoon{% else %}Daily auctions · SkyTycoon{% endif %}{% endblock %}
+{% block body %}
+<style>
+.da-wrap{max-width:1100px;margin:0 auto;padding:32px 16px 56px;color:#e3e7ed;}
+.da-wrap h2{color:#d4af37;font-weight:900;letter-spacing:.06em;margin:0 0 8px;}
+.da-meta{color:#90a4ae;font-size:14px;margin:0 0 24px;}
+.da-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;}
+.da-card{background:linear-gradient(145deg,#0a0806,#14100a);border:2px solid #d4af37;border-radius:12px;padding:18px;}
+.da-card.sold{opacity:.45;border-color:#546e7a;}
+.da-card h3{margin:0 0 6px;color:#ffd54f;font-size:1rem;}
+.da-trend-up{color:#00e676;font-weight:700;}
+.da-trend-down{color:#ff5252;font-weight:700;}
+.da-btn{margin-top:12px;width:100%;padding:11px;border:0;border-radius:8px;font-weight:800;cursor:pointer;background:linear-gradient(135deg,#d4af37,#b8860b);color:#000;}
+.da-btn:disabled{opacity:.4;cursor:not-allowed;}
+.da-empty{text-align:center;padding:40px;color:#78909c;border:1px dashed #2a3545;border-radius:12px;}
+</style>
+<section class="da-wrap">
+  <h2>🛒 {% if lang == 'de' %}Tages-Auktionen (Daily Market){% else %}Daily market auctions{% endif %}</h2>
+  <p class="da-meta">
+    {% if lang == 'de' %}Kontostand:{% else %}Balance:{% endif %}
+    <strong style="color:#00ff66;">{{ "%.0f"|format(pilot_credits) }} CR</strong>
+    · {% if lang == 'de' %}Neue Deals um Mitternacht UTC{% else %}Fresh deals at midnight UTC{% endif %}
+    · <span id="da-reset">—</span>
+  </p>
+  <div class="da-grid" id="da-grid">
+    {% for d in deals %}
+    <article class="da-card{% if d.status != 'active' %} sold{% endif %}" data-deal-id="{{ d.deal_id }}">
+      <h3>{{ d.item_name|e }}</h3>
+      <p style="margin:0;color:#90a4ae;font-size:12px;">{{ d.category|e }} · {{ d.item_type|e }}</p>
+      <p style="margin:10px 0 0;font-size:1.35rem;font-weight:800;color:#00ff66;">{{ "%.0f"|format(d.price_credits) }} CR</p>
+      <p style="margin:4px 0 0;font-size:12px;">
+        {% if d.trend_pct >= 0 %}<span class="da-trend-up">▲ +{{ "%.1f"|format(d.trend_pct) }}%</span>{% else %}<span class="da-trend-down">▼ {{ "%.1f"|format(d.trend_pct) }}%</span>{% endif %}
+        · {% if lang == 'de' %}Basis{% else %}Base{% endif %} {{ "%.0f"|format(d.base_price) }} CR
+      </p>
+      {% if d.status == 'active' %}
+      <button type="button" class="da-btn" data-buy="{{ d.deal_id }}">{% if lang == 'de' %}Jetzt kaufen{% else %}Buy now{% endif %}</button>
+      {% else %}
+      <p style="color:#78909c;margin-top:12px;font-weight:700;">{% if lang == 'de' %}Verkauft{% else %}Sold{% endif %}</p>
+      {% endif %}
+    </article>
+    {% else %}
+    <div class="da-empty" style="grid-column:1/-1;">
+      {% if lang == 'de' %}Keine aktiven Deals — Seite in wenigen Sekunden neu laden.{% else %}No active deals — reload in a few seconds.{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  <p style="margin-top:28px;text-align:center;"><a href="/dashboard" style="color:#64b5f6;">← {% if lang == 'de' %}Zurück zum Dashboard{% else %}Back to dashboard{% endif %}</a></p>
+</section>
+<script>
+(function(){
+  var midnight = {{ next_midnight_utc|default(0) }};
+  var isDe = {{ 'true' if lang == 'de' else 'false' }};
+  var el = document.getElementById('da-reset');
+  function tick(){
+    if (!el) return;
+    var left = Math.max(0, Math.floor(midnight - Date.now()/1000));
+    var h = Math.floor(left/3600), m = Math.floor((left%3600)/60);
+    el.textContent = isDe
+      ? ('Neue Deals in ' + h + ' Std. ' + m + ' Min.')
+      : ('New deals in ' + h + 'h ' + m + 'm');
+  }
+  tick(); setInterval(tick, 30000);
+  document.querySelectorAll('.da-btn[data-buy]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var id = parseInt(btn.getAttribute('data-buy'), 10);
+      if (!id) return;
+      btn.disabled = true;
+      fetch('/api/v1/auctions/daily/buy', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({deal_id: id})
+      }).then(function(r){ return r.json(); }).then(function(d){
+        if (d.ok) location.reload();
+        else {
+          alert(d.error || 'Error');
+          btn.disabled = false;
+        }
+      }).catch(function(){ btn.disabled = false; });
+    });
+  });
+})();
+</script>
+{% endblock %}

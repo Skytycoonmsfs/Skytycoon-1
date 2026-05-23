@@ -1,0 +1,32 @@
+{% extends "base.html" %}{% block title %}{{ t.login_title }}{% endblock %}
+{% block body %}
+<div class="form"><h2 style="margin-top:0;">{{ t.login_heading }}</h2>
+{% if info_banner %}<div class="err" style="background:rgba(46,125,50,0.18);border-color:#43a047;color:#c8e6c9;">{{ info_banner }}</div>{% endif %}
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+<form method="post" action="/login">
+<label>{{ t.login_email }}</label>
+<input type="email" name="email" required autocomplete="username" placeholder="you@example.com"/>
+<label>{{ t.login_password }}</label>
+<input type="password" name="password" required autocomplete="current-password"/>
+<button type="submit">{{ t.login_submit }}</button>
+</form>
+<p style="text-align:center;margin-top:16px;font-size:14px;color:var(--muted);"><a href="/register">{{ t.login_register_link }}</a></p>
+<p style="text-align:center;font-size:13px;color:var(--muted);margin-top:12px;">{% if lang == 'de' %}Keine Lizenz-Mail erhalten? <button type="button" id="btn-resend-welcome" style="background:none;border:none;color:#64b5f6;cursor:pointer;text-decoration:underline;font-size:13px;">Erneut senden</button>{% else %}No license email? <button type="button" id="btn-resend-welcome" style="background:none;border:none;color:#64b5f6;cursor:pointer;text-decoration:underline;font-size:13px;">Resend</button>{% endif %}</p>
+<script>
+(function(){
+  var btn = document.getElementById('btn-resend-welcome');
+  if (!btn) return;
+  btn.addEventListener('click', function(){
+    var em = prompt({% if lang == 'de' %}'Ihre Registrierungs-E-Mail:'{% else %}'Your registration email:'{% endif %});
+    if (!em || em.indexOf('@') < 1) return;
+    fetch('/api/v1/web/account/resend_welcome', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: em.trim()})
+    }).then(function(r){ return r.json(); }).then(function(d){
+      alert(d.message || d.status || 'OK');
+    }).catch(function(){ alert('Network error'); });
+  });
+})();
+</script>
+</div>{% endblock %}

@@ -1,0 +1,16 @@
+{% extends "base.html" %}{% block title %}{% if lang == 'de' %}Konto löschen{% else %}Delete account{% endif %}{% endblock %}
+{% block body %}
+<div class="form">
+  <h2 style="color:#e53935;margin-top:0;">{% if lang == 'de' %}🪓 Konto unwiderruflich löschen{% else %}🪓 Delete account permanently{% endif %}</h2>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <p style="color:#ffb74d;font-size:14px;">{% if lang == 'de' %}Alle Cloud-Daten, Flotte und Statistiken werden gelöscht. Der Lizenzschlüssel wird auf „unbenutzt“ gesetzt.{% else %}All cloud data, fleet and stats will be removed. Your license key will be set to unused.{% endif %}</p>
+  <form method="post" action="/account/delete" target="_blank">
+    <label>E-Mail</label>
+    <input type="email" name="email" required placeholder="{% if lang == 'de' %}Ihre Registrierungs-E-Mail{% else %}Your registration email{% endif %}"/>
+    <label>{% if lang == 'de' %}Passwort{% else %}Password{% endif %}</label>
+    <input type="password" name="password" required autocomplete="current-password"/>
+    <button type="submit" style="background:linear-gradient(135deg,#b71c1c,#7f0000);">{% if lang == 'de' %}[ Konto endgültig löschen ]{% else %}[ Delete account forever ]{% endif %}</button>
+  </form>
+  <p style="margin-top:18px;"><a href="/dashboard" target="_blank">{% if lang == 'de' %}← Abbrechen{% else %}← Cancel{% endif %}</a></p>
+</div>
+{% endblock %}

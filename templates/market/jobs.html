@@ -1,0 +1,16 @@
+{% extends "base.html" %}{% block title %}Flugbörse{% endblock %}{% block body %}
+<section style="max-width:1000px;margin:0 auto;padding:28px 16px;color:#e3e7ed;">
+<h2 style="color:#d4af37;">📋 {% if lang == 'de' %}Live-Flugbörse{% else %}Job board{% endif %}</h2>
+<div id="jobs-list"></div>
+</section>
+<script>
+fetch('/api/v1/jobs/available?icao=ALL',{credentials:'same-origin'}).then(r=>r.json()).then(d=>{
+  var el=document.getElementById('jobs-list'); var jobs=(d&&d.jobs)||[];
+  if(!jobs.length){el.innerHTML='<p style="color:#78909c;">—</p>';return;}
+  el.innerHTML=jobs.slice(0,40).map(function(j){
+    return '<div style="background:#12161f;border:1px solid #2a3545;padding:12px;margin:8px 0;border-radius:8px;">'+
+    (j.departure_icao||'?')+' → '+(j.arrival_icao||'?')+' · '+(j.payout_credits||0)+' CR</div>';
+  }).join('');
+});
+</script>
+{% endblock %}

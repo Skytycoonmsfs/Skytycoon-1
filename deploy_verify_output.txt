@@ -1,0 +1,123 @@
+RETURN 0
+STDOUT:
+========================================================
+SkyTycoon Pro - Remote-Deploy
+Ziel: root@217.154.16.248:22 -> /home/skytycoon
+systemd: True | nginx stop: False | nginx proxy: True | certbot skip: False
+========================================================
+[VERIFY] Remote-Prüfung (kein Deploy) …
+[EXEC] echo '--- Verzeichnis /home/skytycoon ---'
+[STDOUT]: --- Verzeichnis /home/skytycoon ---
+[EXEC] ls -la /home/skytycoon 2>&1 | head -80
+[STDOUT]: total 5456
+drwxr-xr-x 11 root root    4096 May 16 11:03 .
+drwxr-xr-x  4 root root    4096 May 14 15:10 ..
+drwxr-xr-x  2 root root    4096 May 16 11:27 __pycache__
+-rw-r--r--  1 root root    3018 May 16 11:27 cert_checker.py
+drwxr-xr-x  2 root root    4096 May 14 16:44 client_source
+drwxr-xr-x  2 root root    4096 May 17 09:42 database
+drwxr-xr-x  2 root root    4096 May 14 19:23 downloads
+-rw-------  1 root root     129 May 16 11:03 paypal.env
+-rw-r--r--  1 root root     443 May 16 11:27 requirements.txt
+-rw-r--r--  1 root root 5038944 May 17 13:35 server.log
+-rw-r--r--  1 root root  474687 May 16 11:27 server_backend.py
+drwxr-xr-x  2 root root    4096 May 14 19:20 server_logs
+-rw-------  1 root root     218 May 16 07:50 smtp.env
+drwxr-xr-x  4 root root    4096 May 15 19:09 static
+drwxr-xr-x  2 root root    4096 May 16 11:11 templates
+drwxr-xr-x  6 root root    4096 May 16 10:40 user_backups
+drwxr-xr-x  5 root root    4096 May 14 15:10 venv
+-rw-r--r--  1 root root     154 May 14 18:56 version.json
+[EXEC] echo '--- server_backend.py ---'
+[STDOUT]: --- server_backend.py ---
+[EXEC] test -f /home/skytycoon/server_backend.py && ls -la /home/skytycoon/server_backend.py || echo '[FEHLEND] /home/skytycoon/server_backend.py'
+[STDOUT]: -rw-r--r-- 1 root root 474687 May 16 11:27 /home/skytycoon/server_backend.py
+[EXEC] echo '--- requirements.txt ---'
+[STDOUT]: --- requirements.txt ---
+[EXEC] test -f /home/skytycoon/requirements.txt && ls -la /home/skytycoon/requirements.txt || echo '[FEHLEND] /home/skytycoon/requirements.txt'
+[STDOUT]: -rw-r--r-- 1 root root 443 May 16 11:27 /home/skytycoon/requirements.txt
+[EXEC] echo '--- systemctl skytycoon ---'
+[STDOUT]: --- systemctl skytycoon ---
+[EXEC] sudo systemctl status skytycoon.service --no-pager -l 2>&1 || true
+[STDOUT]: ● skytycoon.service - SkyTycoon Pro FastAPI Full-Stack Web Server
+     Loaded: loaded (/etc/systemd/system/skytycoon.service; enabled; preset: enabled)
+     Active: active (running) since Sun 2026-05-17 09:42:54 UTC; 3h 52min ago
+    Process: 1614948 ExecStartPre=/bin/sh -c fuser -k 8000/tcp 2>/dev/null || true; sleep 1 (code=exited, status=0/SUCCESS)
+   Main PID: 1614951 (uvicorn)
+      Tasks: 8 (limit: 28711)
+     Memory: 52.3M (peak: 53.3M)
+        CPU: 23.662s
+     CGroup: /system.slice/skytycoon.service
+             └─1614951 /home/skytycoon/venv/bin/python3 /home/skytycoon/venv/bin/uvicorn server_backend:app --host 127.0.0.1 --port 8000
+
+May 17 09:42:53 ubuntu systemd[1]: Starting skytycoon.service - SkyTycoon Pro FastAPI Full-Stack Web Server...
+May 17 09:42:54 ubuntu systemd[1]: Started skytycoon.service - SkyTycoon Pro FastAPI Full-Stack Web Server.
+[EXEC] echo '--- tail /home/skytycoon/server.log ---'
+[STDOUT]: --- tail /home/skytycoon/server.log ---
+[EXEC] tail -n 30 /home/skytycoon/server.log 2>&1 || true
+[STDOUT]: INFO:     31.10.155.56:0 - "GET /api/v1/public/active_promo HTTP/1.1" 200 OK
+[PAYPAL CRITICAL EXCEPTION]: PayPal Auth Failed: PAYPAL_CLIENT_ID oder PAYPAL_CLIENT_SECRET fehlt (paypal.env auf dem Server prüfen)
+INFO:     31.10.155.56:0 - "POST /api/v1/paypal/create-order HTTP/1.1" 503 Service Unavailable
+[PAYPAL CRITICAL EXCEPTION]: PayPal Auth Failed: PAYPAL_CLIENT_ID oder PAYPAL_CLIENT_SECRET fehlt (paypal.env auf dem Server prüfen)
+INFO:     31.10.155.56:0 - "POST /api/v1/paypal/create-order HTTP/1.1" 503 Service Unavailable
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/dispatch/briefing HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/dispatch/briefing HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/dispatch/briefing HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/dispatch/briefing HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43586 - "GET /api/v1/public/version.json HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/dispatch/briefing HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /dashboard HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/dispatch/briefing HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/public/active_promo HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /dashboard HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/dispatch/briefing HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/web/radar/positions HTTP/1.1" 200 OK
+INFO:     31.10.155.56:0 - "GET /api/v1/public/active_promo HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46948 - "GET /api/v1/public/version.json HTTP/1.1" 200 OK
+[PAYPAL CRITICAL EXCEPTION]: PayPal Auth Failed: PAYPAL_CLIENT_ID oder PAYPAL_CLIENT_SECRET fehlt (paypal.env auf dem Server prüfen)
+INFO:     31.10.155.56:0 - "POST /api/v1/paypal/create-order HTTP/1.1" 503 Service Unavailable
+[EXEC] echo '--- Lauschende Ports (u.a. 8000) ---'
+[STDOUT]: --- Lauschende Ports (u.a. 8000) ---
+[EXEC] sudo ss -tlnp 2>/dev/null | head -40 || netstat -tlnp 2>/dev/null | head -40 || true
+[STDOUT]: State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess                                                                                                                                                                                                                                                                                                                                                                             
+LISTEN 0      4096       127.0.0.1:40989      0.0.0.0:*    users:(("containerd",pid=947,fd=9))                                                                                                                                                                                                                                                                                                                                                
+LISTEN 0      4096   127.0.0.53%lo:53         0.0.0.0:*    users:(("systemd-resolve",pid=646848,fd=15))                                                                                                                                                                                                                                                                                                                                       
+LISTEN 0      2048       127.0.0.1:8000       0.0.0.0:*    users:(("uvicorn",pid=1614951,fd=13))                                                                                                                                                                                                                                                                                                                                              
+LISTEN 0      511          0.0.0.0:443        0.0.0.0:*    users:(("nginx",pid=1602537,fd=34),("nginx",pid=1602536,fd=34),("nginx",pid=1602535,fd=34),("nginx",pid=1602534,fd=34),("nginx",pid=1602533,fd=34),("nginx",pid=1602532,fd=34),("nginx",pid=1602531,fd=34),("nginx",pid=1602530,fd=34),("nginx",pid=1602529,fd=34),("nginx",pid=1602528,fd=34),("nginx",pid=1602527,fd=34),("nginx",pid=1602526,fd=34),("nginx",pid=1381707,fd=34))
+LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=579429,fd=3),("systemd",pid=1,fd=148))                                                                                                                                                                                                                                                                                                                          
+LISTEN 0      511          0.0.0.0:80         0.0.0.0:*    users:(("nginx",pid=1602537,fd=5),("nginx",pid=1602536,fd=5),("nginx",pid=1602535,fd=5),("nginx",pid=1602534,fd=5),("nginx",pid=1602533,fd=5),("nginx",pid=1602532,fd=5),("nginx",pid=1602531,fd=5),("nginx",pid=1602530,fd=5),("nginx",pid=1602529,fd=5),("nginx",pid=1602528,fd=5),("nginx",pid=1602527,fd=5),("nginx",pid=1602526,fd=5),("nginx",pid=1381707,fd=5))             
+LISTEN 0      4096      127.0.0.54:53         0.0.0.0:*    users:(("systemd-resolve",pid=646848,fd=17))                                                                                                                                                                                                                                                                                                                                       
+LISTEN 0      4096         0.0.0.0:5678       0.0.0.0:*    users:(("docker-proxy",pid=1653,fd=7))                                                                                                                                                                                                                                                                                                                                             
+LISTEN 0      128          0.0.0.0:5006       0.0.0.0:*    users:(("python",pid=1603237,fd=3))                                                                                                                                                                                                                                                                                                                                                
+LISTEN 0      2048         0.0.0.0:5005       0.0.0.0:*    users:(("gunicorn",pid=536117,fd=3),("gunicorn",pid=536116,fd=3),("gunicorn",pid=536115,fd=3),("gunicorn",pid=536114,fd=3),("gunicorn",pid=536113,fd=3),("gunicorn",pid=536112,fd=3),("gunicorn",pid=536109,fd=3))                                                                                                                                                                 
+LISTEN 0      511             [::]:443           [::]:*    users:(("nginx",pid=1602537,fd=33),("nginx",pid=1602536,fd=33),("nginx",pid=1602535,fd=33),("nginx",pid=1602534,fd=33),("nginx",pid=1602533,fd=33),("nginx",pid=1602532,fd=33),("nginx",pid=1602531,fd=33),("nginx",pid=1602530,fd=33),("nginx",pid=1602529,fd=33),("nginx",pid=1602528,fd=33),("nginx",pid=1602527,fd=33),("nginx",pid=1602526,fd=33),("nginx",pid=1381707,fd=33))
+LISTEN 0      4096            [::]:22            [::]:*    users:(("sshd",pid=579429,fd=4),("systemd",pid=1,fd=149))                                                                                                                                                                                                                                                                                                                          
+LISTEN 0      511             [::]:80            [::]:*    users:(("nginx",pid=1602537,fd=6),("nginx",pid=1602536,fd=6),("nginx",pid=1602535,fd=6),("nginx",pid=1602534,fd=6),("nginx",pid=1602533,fd=6),("nginx",pid=1602532,fd=6),("nginx",pid=1602531,fd=6),("nginx",pid=1602530,fd=6),("nginx",pid=1602529,fd=6),("nginx",pid=1602528,fd=6),("nginx",pid=1602527,fd=6),("nginx",pid=1602526,fd=6),("nginx",pid=1381707,fd=6))             
+LISTEN 0      4096            [::]:5678          [::]:*    users:(("docker-proxy",pid=1659,fd=7))
+[EXEC] echo '--- version.json (Datei im App-Root) ---'
+[STDOUT]: --- version.json (Datei im App-Root) ---
+[EXEC] test -f /home/skytycoon/version.json && cat /home/skytycoon/version.json || echo '[HINWEIS] Keine /home/skytycoon/version.json — Server nutzt ENV oder leere url.'
+[STDOUT]: {
+  "version": "1.0.1",
+  "url": "https://skytycoon.info/download",
+  "changelog": "Wartungsrelease.",
+  "mandatory": false,
+  "release_channel": "all"
+}
+[EXEC] echo '--- GET /api/v1/public/version.json (127.0.0.1:8000) ---'
+[STDOUT]: --- GET /api/v1/public/version.json (127.0.0.1:8000) ---
+[EXEC] curl -sS -m 8 http://127.0.0.1:8000/api/v1/public/version.json 2>&1 || true
+[STDOUT]: {"version":"1.0.1","url":"https://skytycoon.info/download","changelog":"Wartungsrelease.","mandatory":false,"release_channel":"all"}
+
+[VERIFY FERTIG] Bei fehlender server_backend.py zuerst Deploy ohne --verify ausführen.
+
+STDERR:

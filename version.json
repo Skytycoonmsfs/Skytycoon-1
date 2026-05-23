@@ -1,0 +1,11 @@
+{
+  "version": "1.0.1",
+  "latest_version": "1.0.1",
+  "url": "https://skytycoon.info/static/downloads/SkyTycoon_Pro.exe",
+  "exe_url": "https://skytycoon.info/static/downloads/SkyTycoon_Pro.exe",
+  "download_url": "https://skytycoon.info/static/downloads/SkyTycoon_Pro.exe",
+  "public_download_url": "https://skytycoon.info/static/downloads/SkyTycoon_Pro.exe",
+  "protected_download_url": "https://skytycoon.info/api/v1/web/download/app",
+  "filename": "SkyTycoon_Pro.exe",
+  "updated_at": "2026-05-18T04:30:59Z"
+}

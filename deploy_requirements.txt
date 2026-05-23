@@ -1,0 +1,2 @@
+# Nur für deploy_system.py (lokal auf deinem PC)
+paramiko>=3.4.0

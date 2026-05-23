@@ -1,0 +1,149 @@
+================================================================================
+FEHLER2 — SkyTycoon Pro Projekt-Audit (Vollscan Neuer Ordner 2)
+================================================================================
+Stand: 2026-05-20 | Zweite Audit-Liste (gleicher Inhalt wie fehlende/fehler2-Anforderung)
+Datei: fehler2.txt | Cursor-Tab empfohlen: fehler2
+
+Zweck: Kompletter Durchlauf — was OFFEN ist, was FEHLT, was NICHT richtig
+importiert oder implementiert ist.
+
+================================================================================
+LEGENDE
+================================================================================
+[OK]     = implementiert und verdrahtet
+[!]      = teilweise / Fallback / Laufzeit-Risiko
+[X]      = fehlt oder nicht importiert
+[FROZEN] = main.py Layout darf nicht geaendert werden (nur Import+Trigger)
+
+================================================================================
+A. IMPORT-KOPPLUNG (KRITISCH FUER "KEINE AENDERUNG")
+================================================================================
+
+Datei: main.py
+  [OK] Zeile 10:  from skytycoon_extensions import inject_platin_features
+  [OK] Zeile 11996: inject_platin_features(self) direkt nach super().__init__()
+  [X]  Zeile ~15336: KEIN zweiter Aufruf mehr (korrekt entfernt)
+
+Datei: skytycoon_extensions.py
+  [OK] inject_platin_features() registriert Patches + _PlatinInjector
+  [OK] inj.run() verzögert per QTimer (tab_widget muss existieren)
+  [OK] Build-ID: 20260519-initial-zuendung-v6
+
+Fehlerursache wenn PC unveraendert:
+  - Alte Python-Prozess-Instanz laeuft noch
+  - Start aus falschem Ordner (cwd != Projektroot)
+  - PyInstaller-EXE ohne Neu-Build
+  - __pycache__ mit altem Bytecode
+
+================================================================================
+B. MODULE: IMPORTIERT vs. DATEI VORHANDEN
+================================================================================
+
+Modul                      | main.py import | Datei SSD | Bewertung
+---------------------------|----------------|-----------|------------------
+skytycoon_extensions       | JA (fest)      | JA        | [OK] Bruecke aktiv
+skytycoon_pg               | JA             | JA        | [OK]
+skytycoon_settings_dialog  | JA (lazy)      | JA        | [OK]
+skytycoon_profile_cloud    | NEIN           | JA        | [!] nur Server/Extensions
+skytycoon_prestige_pack    | JA (lazy)      | NEIN      | [X] Prestige eingeschraenkt
+skytycoon_auto_cabin       | JA (lazy)      | NEIN      | [X] Auto-Cabin tot
+download_cabin_sounds      | JA (lazy)      | NEIN      | [X] main CDN tot
+wirtschaft_m216_extension  | NEIN           | JA        | [!] nur Web-Server
+
+================================================================================
+C. FEATURES EXTENSIONS (OHNE main.py-LAYOUT-AENDERUNG)
+================================================================================
+
+Logout goldenes Menu:
+  [OK] _purge_session_ram_cache (ionos_jwt, session_token, Meta)
+  [OK] main_tab_widget.setVisible(False) + _hide_main_cockpit
+  [X]  Kein login_widget in main.py -> nur StartupAuthDialog
+
+Multi-Account / Patrick.S:
+  [OK] Client: sterile HWID in auth/login + cloud_sync JSON
+  [!]  Server: PostgreSQL Slot-Limit <3 muss frei sein
+  [!]  "Anmeldung fehlgeschlagen" = oft Server ODER altes JWT im RAM
+
+Passagier-Feedback & Pax Radar:
+  [OK] Tab injiziert, 48 Announcement-Buttons
+  [OK] QSoundEffect, Pfad mit Forward-Slashes, Slider 75%
+  [!]  Echte Menschen-Stimmen nur mit CDN-Dateien; sonst Synth-WAV
+  [!]  main.py pygame/CabinAudio kann noch System-Toene ausloesen
+
+Cabin Live Hub-Tab:
+  [OK] _hide_cabin_live_hub_tab versucht Entfernen
+
+Weitere Extensions:
+  [OK] GSX Remote, P2P Hangar, Charter async, Cloud-Sync
+  [OK] Thread-safe Pax/P2P (Signals)
+  [!]  Scroll global alle Hubs — nicht vollstaendig
+  [!]  Kasse Allianz, Immobilienmakler — am PC testen
+  [FROZEN] EFB-Tab / Bank-Umbenennung — nur main.py
+
+================================================================================
+D. ASSETS & AUDIO
+================================================================================
+
+assets/sounds/*.wav auf SSD: 56 Dateien [OK]
+download_cabin_sounds.py: fehlt [X]
+Extensions eigener CDN-Downloader: [OK] in skytycoon_extensions.py
+Synthese-Fallback (_pcm_sine): [OK] wenn CDN fehlschlaegt
+
+================================================================================
+E. SERVER / TEMPLATES / DEPLOY
+================================================================================
+
+server_backend.py: vorhanden [OK]
+Templates HTML: 38 Dateien [OK] (u.a. daily_auctions, index, dashboard)
+Deploy-Skript: tools/m216_hotfix_deploy.py [OK]
+wirtschaft_m216: nur server_backend registriert [OK Server / X Desktop]
+
+================================================================================
+F. PYINSTALLER & MUELLORDNER
+================================================================================
+
+main.spec:
+  hiddenimports=[] [ ! ] -> skytycoon_extensions nur via Import in main.py
+  EXE nach Extension-Fix NEU BAUEN
+
+Nicht als Produktivcode nutzen:
+  tools/PLATIN_RECOVERY_BACKUP_SAFE/  (alte main.py ohne Bruecke oben)
+  pulled_from_ionos/                  (IONOS-Snapshots)
+  flutter/ / skytycoonmobile/         (Mobile-Engine, nicht Desktop)
+
+================================================================================
+G. OFFENE PUNKTE — PRIORITAET
+================================================================================
+
+PRIO 1 [SOFORT]
+  - SkyTycoon komplett beenden
+  - Alle __pycache__ und .pyc im Projekt loeschen
+  - cd "Neuer Ordner (2)" && python main.py
+
+PRIO 2 [TEST AM PC]
+  - Logout: nur Login sichtbar?
+  - Patrick.S Login ohne Lizenzschluessel?
+  - Pax-Tab: Stimme statt Ping?
+
+PRIO 3 [FEHLENDE DATEIEN ANLEGEN]
+  - download_cabin_sounds.py
+  - skytycoon_auto_cabin.py
+  - skytycoon_prestige_pack.py
+  (oder main.py Imports entfernen — nur mit Layout-Erlaubnis)
+
+PRIO 4 [EXE]
+  - pyinstaller main.spec neu bauen falls .exe genutzt wird
+
+PRIO 5 [SERVER]
+  - HWID-Slots fuer Patrick.S in PostgreSQL (Admin_Commander)
+
+================================================================================
+H. ZUSAMMENFASSUNG EINZEILER
+================================================================================
+
+Bruecke main.py: [OK] | 3 Python-Module fehlen: [X] | Extensions v6: [OK]
+56 WAV lokal: [OK] | PC-Verhalten: [OFFEN] | Server M216: [OK nur Web]
+
+================================================================================
+Ende fehler2.txt — gleicher Vollscan wie fehlende.md / fehlende.txt
+================================================================================

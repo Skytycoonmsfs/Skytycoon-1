@@ -1,0 +1,18 @@
+{% extends "base.html" %}{% block title %}{% if lang == 'de' %}Hardware-ID zurücksetzen{% else %}Reset hardware ID{% endif %}{% endblock %}
+{% block body %}
+<div class="form">
+  <h2 style="color:#d4af37;margin-top:0;">{% if lang == 'de' %}🔄 Hardware-ID freigeben{% else %}🔄 Release hardware ID{% endif %}</h2>
+  {% if request.query_params.get('ok') == '1' %}
+  <p style="color:#66bb6a;">{% if lang == 'de' %}Erfolg — Sie können SkyTycoon auf einem neuen PC mit Ihrem Lizenzschlüssel aktivieren.{% else %}Success — activate SkyTycoon on a new PC with your license key.{% endif %}</p>
+  {% endif %}
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <p style="color:#90a4ae;font-size:14px;">{% if lang == 'de' %}Bestätigen Sie mit Ihrem Kontopasswort (2FA). Der Lizenzschlüssel bleibt gültig.{% else %}Confirm with your account password (2FA). Your license key stays valid.{% endif %}</p>
+  <form method="post" action="/account/hwid_reset" target="_blank">
+    <label>{% if lang == 'de' %}Passwort{% else %}Password{% endif %}</label>
+    <input type="password" name="password" required autocomplete="current-password"/>
+    <input type="hidden" name="confirm" value="yes"/>
+    <button type="submit">{% if lang == 'de' %}[ Hardware-ID zurücksetzen ]{% else %}[ Reset hardware ID ]{% endif %}</button>
+  </form>
+  <p style="margin-top:18px;"><a href="/dashboard" target="_blank">{% if lang == 'de' %}← Dashboard{% else %}← Dashboard{% endif %}</a></p>
+</div>
+{% endblock %}

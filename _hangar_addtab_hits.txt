@@ -1,0 +1,50 @@
+
+=== line 2357 old_string len=277 ===
+        self.hangar_inner_tabs.addTab(
+            hang_maint_page,
+            self._tr("hangar.tab.maint", "Wartung"),
+        )
+        self.hangar_inner_tabs.addTab(
+            hang_parts_page,
+            self._tr("hangar.tab.parts_market", "Ersatzteil-Markt"),
+        )
+
+=== line 2357 new_string len=449 ===
+        self.hangar_inner_tabs.addTab(
+            hang_maint_page,
+            self._tr("hangar.tab.parts_wear", "Bauteile & Verschleiß"),
+        )
+        self.hangar_inner_tabs.addTab(
+            hang_prof_maint_page,
+            self._tr("hangar.tab.professional", "12-Checks Wartung"),
+        )
+        self.hangar_inner_tabs.addTab(
+            hang_parts_page,
+            self._tr("hangar.tab.parts_market", "Ersatzteil-Markt"),
+        )
+
+=== line 2651 old_string len=1039 ===
+        self.hangar_inner_tabs.addTab(
+            hang_maint_page,
+            self._tr("hangar.tab.parts_wear", "Bauteile & Verschleiß"),
+        )
+        self.hangar_inner_tabs.addTab(
+            hang_prof_maint_page,
+            self._tr("hangar.tab.professional", "12-Checks Wartung"),
+        )
+        self.hangar_inner_tabs.addTab(
+            hang_parts_page,
+            self._tr("hangar.tab.parts_market", "Ersatzteil-Markt"),
+        )
+        self.hangar_inner_tabs.addTab(
+            self.tab_used_scrapyard,
+            self._tr("hangar.tab.scrapyard_used", "⚙️ Cloud-Schrottplatz (Gebraucht)"),
+        )
+        self.hangar_inner_tabs.addTab(
+            self.tab_new_parts_market,
+            self._tr("hangar.tab.parts_new", "💎 Hangar-Neuteile (100 %)"),
+        )
+        self.hangar_inner_tabs.setMinimumHeight(420)
+        self.hangar_inner_tabs.currentChanged.connect(self._on_hangar_inner_tab_changed)
+        hang_outer.addWidget(self.hangar_inner_tabs, stretch=1)
+        self._inject_hangar_scrapyard_subtab()
