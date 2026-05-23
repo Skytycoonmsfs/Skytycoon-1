@@ -108,7 +108,8 @@ def install_platin_alliance_13_center(main_window: Any, injector: Any) -> bool:
     if layout is None:
         return False
     try:
-        inner.currentChanged.disconnect()
+        if inner.receivers(inner.currentChanged) > 0:
+            inner.currentChanged.disconnect()
     except (RuntimeError, TypeError):
         pass
     idx = layout.indexOf(inner)
@@ -145,6 +146,7 @@ class PlatinAlliance13Center(QWidget):
         self._async_callback: Any = None
         self._pillar_refresh_inflight = False
         self._pillar_refresh_pending: bool = False
+        self._stolen_widgets: set[int] = set()
         self.setStyleSheet(PLATIN_BLUE_PANEL)
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -180,7 +182,6 @@ class PlatinAlliance13Center(QWidget):
         self._poll.setInterval(20_000)
         self._poll.timeout.connect(self._poll_tick)
         self._poll.start()
-        self._stolen_widgets: set[int] = set()
 
     def _safe_initial_refresh(self) -> None:
         try:
@@ -193,16 +194,20 @@ class PlatinAlliance13Center(QWidget):
         """Widget einmalig einbetten — kein Doppel-Reparent (Qt-Absturz)."""
         if widget is None:
             return None
+        stolen = getattr(self, "_stolen_widgets", None)
+        if stolen is None:
+            self._stolen_widgets = set()
+            stolen = self._stolen_widgets
         wid = id(widget)
         try:
             if widget.parent() is lay:
                 lay.addWidget(widget, stretch)
                 return widget
-            if wid in self._stolen_widgets:
+            if wid in stolen:
                 lay.addWidget(widget, stretch)
                 return widget
             widget.setParent(None)
-            self._stolen_widgets.add(wid)
+            stolen.add(wid)
             widget.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )

@@ -2269,6 +2269,9 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
             if hasattr(self, "ed_login_key") and self.ed_login_key.isVisible()
             else ""
         )
+        self._platin_fresh_login = True
+        _clear_stale_login_identity(main_module, self._path)
+        hid = _normalize_client_hwid(main_module, self._path, force_os=True)
         if not pilot or not pw or not hid:
             QMessageBox.warning(
                 self,
@@ -2280,9 +2283,6 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
             return
         body = _desktop_auth_login_body(main_module, self._path, pilot, pw, key)
         parent_win = getattr(self, "parent_window", None) or self.parent()
-        self._platin_fresh_login = True
-        _clear_stale_login_identity(main_module, self._path)
-        hid = _normalize_client_hwid(main_module, self._path, force_os=True)
         try:
             r = requests.post(
                 f"{base}/api/v1/auth/login",
