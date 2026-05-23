@@ -152,13 +152,13 @@ def hydrate_platin_credentials_from_disk(main_mod: Any) -> None:
         return
     try:
         jwt_existing = _direct_meta_get(sess, orig_conn, "ionos_jwt", "").strip()
-        if jwt_existing:
-            return
+        em_existing = _direct_meta_get(sess, orig_conn, "portal_email", "").strip()
         pw_existing = (
             _direct_meta_get(sess, orig_conn, "cloud_backup_password", "")
             or _direct_meta_get(sess, orig_conn, "cloud_sync_password", "")
         ).strip()
-        em_existing = _direct_meta_get(sess, orig_conn, "portal_email", "").strip()
+        if jwt_existing and em_existing and "@" in em_existing:
+            return
     except Exception:
         jwt_existing = pw_existing = em_existing = ""
     try:
@@ -311,7 +311,14 @@ def patch_mainwindow_cloud_guard(main_mod: Any) -> None:
 
     def _open_customer_profile_dialog_patched(self: Any) -> None:
         ensure_platin_session_db(main_mod)
-        hydrate_platin_credentials_from_disk(main_mod)
+        try:
+            from skytycoon_extensions import _platin_inject_profile_cloud_credentials
+
+            db = getattr(main_mod, "DB_PATH", None)
+            if db is not None:
+                _platin_inject_profile_cloud_credentials(main_mod, db, self)
+        except Exception:
+            hydrate_platin_credentials_from_disk(main_mod)
         if callable(orig_open_profile):
             orig_open_profile(self)
 

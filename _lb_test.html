@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="de"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="description" content="SkyTycoon Pro — Airline career suite for MSFS."/>
+<title>Welt-Rangliste</title><style>
+:root {
+  --bg:#070a0e; --bg2:#0d1218; --panel:#121a24; --line:#1e3a5f; --gold:#c9a227; --gold2:#e8c547;
+  --txt:#eceff1; --muted:#90a4ae; --accent:#1976d2; --accent2:#42a5f5; --glow:rgba(25,118,210,.35);
+}
+* { box-sizing:border-box; }
+body { margin:0; font-family:'Segoe UI',system-ui,Roboto,Arial,sans-serif; background:var(--bg); color:var(--txt); min-height:100vh;
+  background-image:radial-gradient(ellipse 120% 80% at 50% -20%, rgba(30,58,95,.45), transparent 55%), linear-gradient(180deg,var(--bg) 0%,#0a1018 100%); }
+a { color:var(--accent2); text-decoration:none; transition:color .15s; } a:hover { color:#fff; text-decoration:underline; }
+.nav {
+  display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;
+  padding:14px max(24px,4vw); background:rgba(6,10,16,.85); backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--line); position:sticky; top:0; z-index:50;
+}
+.nav h1 { margin:0; font-size:1.05rem; font-weight:800; letter-spacing:.18em; color:var(--accent2); text-shadow:0 0 24px var(--glow); }
+.nav-links { display:flex; flex-wrap:wrap; align-items:center; gap:6px 20px; }
+.nav-links > a:not(.nav-cta) { font-weight:600; font-size:14px; opacity:.92; }
+a.nav-link { font-weight:600; font-size:14px; opacity:.95; }
+a.footer-link { font-size:13px; color:var(--accent2); }
+a.footer-link:hover { color:#fff; }
+.nav-cta {
+  display:inline-block; font-weight:700; font-size:14px; padding:10px 18px; border-radius:10px;
+  background:linear-gradient(135deg,#1565c0,#0d47a1); color:#fff !important; border:1px solid #42a5f5;
+  box-shadow:0 4px 20px var(--glow);
+}
+.nav-cta:hover { filter:brightness(1.08); text-decoration:none; color:#fff !important; }
+.lang a { font-weight:700; font-size:13px; opacity:.75; }
+.lang a.active { color:var(--gold2); opacity:1; text-decoration:underline; }
+.hero { text-align:center; padding:clamp(40px,8vw,88px) 20px 40px; }
+.hero h2 { font-size:clamp(1.55rem,4vw,2.35rem); margin:0 0 16px; font-weight:800; line-height:1.2; letter-spacing:-.02em; }
+.hero p { max-width:640px; margin:0 auto; color:var(--muted); line-height:1.65; font-size:1.05rem; }
+.badge {
+  display:inline-block; font-size:11px; font-weight:700; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--gold2); border:1px solid rgba(201,162,39,.45); padding:6px 14px; border-radius:999px; margin-bottom:18px; background:rgba(201,162,39,.08);
+}
+.grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(270px,1fr)); gap:22px; max-width:1120px; margin:0 auto; padding:8px 20px 56px; }
+.card {
+  background:var(--panel); border:1px solid #1e2836; border-radius:16px; padding:24px 22px;
+  transition:transform .18s ease,border-color .18s,box-shadow .18s;
+}
+.card:hover { transform:translateY(-3px); border-color:#2a4a6f; box-shadow:0 12px 40px rgba(0,0,0,.35); }
+.card h3 { margin-top:0; color:var(--accent2); font-size:1.08rem; font-weight:700; }
+.card p { margin:0; color:var(--muted); line-height:1.55; font-size:14px; }
+.form { max-width:440px; margin:40px auto; background:var(--panel); padding:32px; border-radius:16px; border:1px solid var(--line); box-shadow:0 16px 48px rgba(0,0,0,.25); }
+label { display:block; font-size:11px; color:var(--muted); margin-bottom:6px; text-transform:uppercase; letter-spacing:.08em; font-weight:600; }
+input { width:100%; padding:13px 14px; border-radius:10px; border:1px solid #2c3b4d; background:#0a1018; color:var(--txt); margin-bottom:14px; font-size:15px; }
+input:focus { outline:none; border-color:var(--accent2); box-shadow:0 0 0 3px rgba(66,165,245,.2); }
+button, .btn {
+  display:inline-block; width:100%; padding:15px; border:none; border-radius:10px;
+  background:linear-gradient(135deg,#1976d2,#0d47a1); color:#fff; font-weight:700; cursor:pointer; font-size:15px;
+}
+button:hover, .btn:hover { filter:brightness(1.06); }
+.btn-secondary { background:transparent; border:2px solid var(--accent2); color:var(--accent2); }
+.btn-secondary:hover { background:rgba(66,165,245,.12); color:#fff; }
+.err { background:#2d1216; border:1px solid #b71c1c; color:#ffcdd2; padding:14px; border-radius:10px; margin-bottom:16px; font-size:14px; text-align:center; }
+.success-key { font-family:ui-monospace,Consolas,monospace; font-size:1.2rem; color:var(--gold2); background:#0a1018; padding:18px; border-radius:12px; text-align:center; letter-spacing:.1em; margin:20px 0; border:1px solid rgba(201,162,39,.35); }
+.trust-strip {
+  display:flex; flex-wrap:wrap; justify-content:center; gap:12px 28px; max-width:900px; margin:28px auto 0;
+  padding:16px 20px; border-radius:14px; background:rgba(18,26,36,.65); border:1px solid #1e2836; font-size:13px; color:var(--muted);
+}
+.trust-strip span { font-weight:600; color:#b0bec5; }
+footer { text-align:center; padding:28px 16px 36px; color:var(--muted); font-size:12px; border-top:1px solid #1a2433; }
+.cta-row { display:flex; flex-wrap:wrap; justify-content:center; gap:14px; margin-top:28px; }
+.cta-row .btn, .cta-row .btn-secondary { width:auto; min-width:200px; padding:14px 26px; }
+.legal-doc { max-width:800px; margin:0 auto; padding:32px max(20px,4vw) 56px; line-height:1.65; }
+.legal-doc h1 { font-size:1.5rem; color:var(--accent2); margin-top:0; }
+.legal-doc h2 { font-size:1.1rem; color:#81d4fa; margin-top:1.75rem; }
+.legal-doc p, .legal-doc li { color:var(--muted); font-size:15px; }
+.legal-doc a { word-break: break-all; }
+.shot-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:22px; max-width:1200px; margin:0 auto; padding:8px 20px 48px; }
+.shot-card { background:var(--panel); border:1px solid #1e2836; border-radius:14px; overflow:hidden; cursor:pointer; transition:transform .15s, box-shadow .15s; }
+.shot-card:hover { transform:translateY(-4px); box-shadow:0 14px 40px rgba(0,0,0,.4); }
+.shot-card img { width:100%; height:200px; object-fit:cover; display:block; background:#0a1018; }
+.shot-card figcaption { padding:14px 16px; font-size:14px; color:#cfd8dc; font-weight:600; line-height:1.4; }
+#lb-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.88); z-index:200; align-items:center; justify-content:center; padding:24px; }
+#lb-overlay.open { display:flex; }
+#lb-overlay img { max-width:min(96vw,1400px); max-height:90vh; border-radius:8px; box-shadow:0 8px 48px #000; }
+#lb-close { position:fixed; top:18px; right:22px; color:#fff; font-size:15px; cursor:pointer; font-weight:700; z-index:210; }
+#promo-banner {
+  display:none; position:sticky; top:0; z-index:100;
+  text-align:center; padding:12px 20px;
+  font-weight:800; font-size:15px; letter-spacing:.04em;
+  color:#1a1510;
+  background:linear-gradient(92deg,#5c4514,#c9a227,#f0d56a,#c9a227,#5c4514);
+  border-bottom:2px solid rgba(40,30,10,.35);
+  box-shadow:0 0 32px rgba(232,197,71,.55);
+  opacity:0; transition:opacity .5s ease;
+}
+#promo-banner.on { opacity:1; }
+</style></head><body>
+<div id="promo-banner" role="status" aria-live="polite"></div>
+
+<nav class="nav"><h1>✈ SKYTYCOON PRO</h1><div class="nav-links">
+<a href="/" class="nav-link">Startseite</a>
+<a href="/screenshots" class="nav-link">Screenshots</a>
+<a href="/roster" class="nav-link" style="color:#8ac7ff;font-weight:bold;">👥 Piloten-Roster</a>
+<a href="/leaderboard" class="nav-link" style="color:#d4af37;font-weight:bold;">🏆 Welt-Rangliste</a>
+<a href="/alliances" class="nav-link" style="color:#d4af37;font-weight:bold;">🤝 Allianzen</a>
+<a href="/hardware-id" class="nav-link" style="color:#42a5f5;font-weight:bold;">💻 Hardware-ID finden</a>
+<a href="/register" class="nav-link" target="_blank" rel="noopener">Registrieren</a>
+<a class="nav-cta" href="/login">Kundenkonto</a>
+<a href="/download" class="nav-link">Download</a>
+<span class="lang"><a class="active" href="/set-lang?lang=de&amp;next=/leaderboard">DE</a> · <a href="/set-lang?lang=en&amp;next=/leaderboard">EN</a></span>
+</div></nav>
+
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.min.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+.rb-wrap { max-width:1180px; margin:0 auto; padding:8px 16px 56px; }
+.rb-hero h2 { color:#00a2ff; text-shadow:0 0 28px rgba(0,162,255,.45); text-align:center; }
+.rb-intro { color:#8ac7ff; text-align:center; max-width:760px; margin:0 auto 20px; line-height:1.6; }
+#rb-map { height:320px; border-radius:14px; border:2px solid #00a2ff; margin-bottom:22px; background:#070a10; }
+.rb-table-wrap { overflow-x:auto; border:1px solid #00a2ff; border-radius:14px; background:#0b0f19; }
+.rb-table { width:100%; border-collapse:collapse; font-size:14px; }
+.rb-table thead tr { background:#111625; color:#8ac7ff; text-align:left; }
+.rb-table th, .rb-table td { padding:12px 14px; border-top:1px solid #1e3a5f; }
+.rb-table tbody tr { color:#cfd8dc; cursor:pointer; transition:background .12s; }
+.rb-table tbody tr:hover { background:#121a2e; }
+.rb-pilot { color:#eceff1; font-weight:700; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.rb-medal { font-size:1.1rem; }
+.rb-verified { color:#00a2ff; font-size:11px; font-weight:800; letter-spacing:.04em; }
+.rb-live { display:inline-flex; align-items:center; gap:6px; color:#00d2ff; font-size:12px; font-weight:700; }
+.rb-live-dot { width:8px; height:8px; border-radius:50%; background:#00a2ff; animation:rbpulse 1.2s ease-in-out infinite; box-shadow:0 0 10px #00a2ff; }
+@keyframes rbpulse { 0%,100%{opacity:.35;transform:scale(.85)} 50%{opacity:1;transform:scale(1.15)} }
+.rb-credits { color:#e8c547; font-weight:700; }
+.rb-empty { text-align:center; color:#8ac7ff; padding:40px 20px; }
+</style>
+<div class="hero rb-hero" style="padding-bottom:8px;">
+<h2>🏆 Welt-Rangliste</h2>
+<p class="rb-intro">Öffentliche Übersicht aller registrierten Piloten — Klick öffnet Live-Profil (Credits, XP, Flugstatus).</p>
+</div>
+<div class="rb-wrap">
+<div id="rb-map"></div>
+<div class="rb-table-wrap">
+
+<p class="rb-empty">Noch keine Piloten in der Datenbank.</p>
+
+</div>
+</div>
+<script>
+(function(){
+  var pilots = [];
+  function esc(s){ var d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
+  function openProfile(id){
+    fetch('/api/v1/public/roster/profile/' + encodeURIComponent(id))
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(!d || !d.ok || !d.profile) throw new Error('nf');
+        var p = d.profile;
+        var live = p.live_flight;
+        var liveHtml = live && live.active
+          ? '<p><b>IN FLIGHT:</b> ' + esc(live.route) + ' · ' + esc(live.aircraft) + '</p>'
+          : '<p><b>Status:</b> Am Boden</p>';
+        var ver = p.verified_captain ? '<p style="color:#00a2ff;font-weight:800;">✓ VERIFIED CAPTAIN</p>' : '';
+        Swal.fire({
+          title: esc(p.username),
+          html: ver + '<p><b>Credits:</b> ' + esc(p.credits_fmt) + '</p><p><b>XP:</b> ' + esc(String(p.xp)) + '</p>'
+            + '<p><b>Flüge:</b> ' + esc(String(p.total_flights||0)) + '</p><p><b>Härte-Landung:</b> ' + esc(String(p.hardest_landing||0)) + ' fpm</p>'
+            + '<p><b>' + esc(p.alliance) + '</b></p>' + liveHtml,
+          confirmButtonColor: '#00a2ff', background: '#0b0f19', color: '#8ac7ff'
+        });
+      }).catch(function(){ Swal.fire({icon:'error', title:'Profil', text:'Nicht gefunden.', background:'#0b0f19', color:'#8ac7ff'}); });
+  }
+  document.querySelectorAll('.rb-row').forEach(function(row){
+    row.addEventListener('click', function(){ openProfile(row.getAttribute('data-id')); });
+  });
+  var mapEl = document.getElementById('rb-map');
+  if(!mapEl || typeof L === 'undefined') return;
+  var map = L.map('rb-map', { worldCopyJump: true }).setView([20, 10], 2);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap', maxZoom: 18
+  }).addTo(map);
+  var planeIcon = L.divIcon({
+    className: 'rb-plane-icon',
+    html: '<div style="color:#00a2ff;font-size:18px;text-shadow:0 0 8px #00a2ff;">✈</div>',
+    iconSize: [24, 24], iconAnchor: [12, 12]
+  });
+  function plotPositions(list){
+    list.forEach(function(p){
+      if(p.lat == null || p.lon == null) return;
+      var m = L.marker([p.lat, p.lon], { icon: planeIcon }).addTo(map);
+      m.bindPopup('<b>' + esc(p.username) + '</b><br>IN FLIGHT<br>' + esc(p.route||''));
+    });
+  }
+  fetch('/api/v1/public/roster/live-positions').then(function(r){ return r.json(); }).then(function(d){
+    if(d && d.pilots) plotPositions(d.pilots);
+  }).catch(function(){});
+  pilots.forEach(function(p){
+    if(p.in_flight && p.lat != null && p.lon != null){
+      var m = L.marker([p.lat, p.lon], { icon: planeIcon }).addTo(map);
+      m.bindPopup('<b>' + esc(p.username) + '</b><br>' + esc(p.live_route||'IN FLIGHT'));
+    }
+  });
+})();
+</script>
+
+
+<footer>
+<p style="margin:0 0 8px;">SkyTycoon Pro · IONOS · Web-Portal (Deutsch / English)</p>
+<p style="margin:0;font-size:13px;">Rechtliches:
+<a href="/impressum" class="footer-link">Impressum</a> |
+<a href="/agb" class="footer-link">AGB</a> |
+<a href="/datenschutz" class="footer-link">Datenschutz</a>
+</p>
+</footer>
+
+<script>
+(function(){
+  var el = document.getElementById('promo-banner');
+  if(!el) return;
+  fetch('/api/v1/public/active_promo').then(function(r){ return r.json(); }).then(function(d){
+    if(!d || !d.active || !d.banner_text) return;
+    el.textContent = d.banner_text;
+    el.style.display = 'block';
+    requestAnimationFrame(function(){ el.classList.add('on'); });
+  }).catch(function(){});
+})();
+</script>
+</body></html>

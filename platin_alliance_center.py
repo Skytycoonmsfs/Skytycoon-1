@@ -35,9 +35,66 @@ from PySide6.QtWidgets import (
 
 from skytycoon_theme import SKY_DARK_PANEL_STYLE, SKY_DARK_SCROLL_CSS
 
-PLATIN_BLUE_SCROLL_CSS = SKY_DARK_SCROLL_CSS
-PLATIN_BLUE_PANEL = SKY_DARK_PANEL_STYLE
+PLATIN_BLUE_SCROLL_CSS = """
+QScrollArea { background: #0b0f19; border: none; }
+QScrollBar:vertical { background: #0b0f19; width: 12px; margin: 2px; }
+QScrollBar::handle:vertical { background: #00a2ff; border-radius: 5px; min-height: 28px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+"""
+PLATIN_BLUE_PANEL = """
+QWidget { background-color: #0b0f19; color: #eceff1; }
+QTabWidget::pane { border: 1px solid #00a2ff; background: #0b0f19; border-radius: 8px; }
+QTabBar::tab {
+    background: #111625; color: #8ac7ff; padding: 8px 14px;
+    border: 1px solid #00a2ff; border-bottom: none; font-weight: 700;
+}
+QTabBar::tab:selected { background: #00a2ff; color: #0b0f19; }
+QGroupBox { border: 1px solid #00a2ff; color: #8ac7ff; margin-top: 12px; font-weight: 700; }
+QPushButton { background: #00a2ff; color: #0b0f19; border: none; border-radius: 6px; padding: 8px 14px; font-weight: 800; }
+QPushButton:hover { background: #8ac7ff; }
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit {
+    background: #05080f; color: #8ac7ff; border: 2px solid #00a2ff; border-radius: 6px; padding: 6px 10px;
+}
+QLabel { color: #cfd8dc; background: transparent; }
+"""
 ALLIANCE_HTTP_TIMEOUT_SEC = 14
+
+
+def sterile_purge_widget_layout(target: QWidget | None) -> None:
+    """Tab/Container restlos leeren — verhindert setLayout()-Crash bei Re-Injektion."""
+    if target is None:
+        return
+    old_layout = target.layout()
+    if old_layout is not None:
+        while old_layout.count():
+            item = old_layout.takeAt(0)
+            if item is None:
+                continue
+            child_w = item.widget()
+            if child_w is not None:
+                child_w.setParent(None)
+                child_w.deleteLater()
+            child_l = item.layout()
+            if child_l is not None:
+                while child_l.count():
+                    sub = child_l.takeAt(0)
+                    if sub and sub.widget():
+                        sub.widget().setParent(None)
+                        sub.widget().deleteLater()
+        target.setLayout(None)
+        try:
+            from shiboken6 import delete as _shib_delete
+
+            _shib_delete(old_layout)
+        except Exception:
+            old_layout.deleteLater()
+    for child in list(target.children()):
+        try:
+            if isinstance(child, QWidget):
+                child.setParent(None)
+                child.deleteLater()
+        except RuntimeError:
+            pass
 
 
 class _FnRunnable(QRunnable):
@@ -104,6 +161,8 @@ def install_platin_alliance_13_center(main_window: Any, injector: Any) -> bool:
     if isinstance(inner, PlatinAlliance13Center):
         return True
     parent = inner.parentWidget()
+    if parent is not None:
+        sterile_purge_widget_layout(parent)
     layout = parent.layout() if parent is not None else None
     if layout is None:
         return False
@@ -712,7 +771,10 @@ class PlatinAlliance13Center(QWidget):
     def _debounced_refresh_current(self) -> None:
         if not self._alliance_hub_visible():
             return
-        self.refresh_current_pillar(fetch_state=True)
+        try:
+            self.refresh_current_pillar(fetch_state=True)
+        except Exception as exc:
+            print(f"[SkyTycoon] Allianz-Pillar-Refresh abgefangen: {exc!s}", flush=True)
 
     def _current_pillar_key(self) -> str:
         ix = self.tabs.currentIndex()

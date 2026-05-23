@@ -97,17 +97,24 @@ ADMIN_MASTER_PASSWORD = (
     or os.environ.get("SKYTYCOON_ADMIN_PASSWORD")
     or "e85OieJLPMV6Nuv"
 ).strip()
+def _superadmin_emails_admin() -> frozenset[str]:
+    raw = (os.environ.get("SKYTYCOON_SUPERADMIN_EMAILS") or "").strip()
+    return frozenset(
+        x.strip().lower()
+        for x in raw.replace(";", ",").split(",")
+        if x.strip() and "@" in x
+    )
+
+
+GLOBAL_SUPERADMIN_EMAILS: frozenset[str] = _superadmin_emails_admin()
 GLOBAL_SUPERADMIN_EMAIL = (
-    os.environ.get("SKYTYCOON_SUPERADMIN_EMAIL") or "info@skytycoon.info"
-).strip().lower()
-BIGMAQ_SUPERADMIN_EMAIL = (
-    os.environ.get("SKYTYCOON_BIGMAQ_SUPERADMIN_EMAIL") or "bigmaq@skytycoon.info"
-).strip().lower()
-GLOBAL_SUPERADMIN_EMAILS: frozenset[str] = frozenset(
-    {GLOBAL_SUPERADMIN_EMAIL, BIGMAQ_SUPERADMIN_EMAIL}
+    os.environ.get("SKYTYCOON_PRIMARY_SUPERADMIN_EMAIL", "").strip().lower()
+    or next(iter(GLOBAL_SUPERADMIN_EMAILS), "")
 )
 GLOBAL_SUPERADMIN_BOOT_PASSWORD = (
-    os.environ.get("SKYTYCOON_SUPERADMIN_PASSWORD") or "Wilkommen007!"
+    os.environ.get("SKYTYCOON_SUPERADMIN_BOOT_PASSWORD")
+    or os.environ.get("SKYTYCOON_SUPERADMIN_PASSWORD")
+    or ""
 ).strip()
 DEFAULT_DB = Path(os.environ.get("SKYTYCOON_DB_PATH") or (BASE_DIR / "career.db")).resolve()
 ADMIN_LOG = BASE_DIR / "admin_actions.log"
@@ -776,12 +783,43 @@ class AdminCommanderWindow(QMainWindow):
                 self.ed_admin_master.setText(ADMIN_MASTER_PASSWORD)
         if hasattr(self, "ed_ionos_api") and not self.ed_ionos_api.text().strip():
             self.ed_ionos_api.setText(IONOS_SERVER_URL)
-        QTimer.singleShot(0, self.load_active_users)
+        QTimer.singleShot(80, self._ensure_admin_password_valid)
+        QTimer.singleShot(200, self.load_active_users)
         self._wire_crm_copy_and_tables()
         QTimer.singleShot(50, self._executive_superadmin_handshake)
 
+    def _ensure_admin_password_valid(self) -> None:
+        """Altes gespeichertes Passwort (z. B. Wilkommen007) → Standard-Admin-PW."""
+        base = self._ionos_base_url()
+        if not base or not hasattr(self, "ed_admin_master"):
+            return
+        pw = (self.ed_admin_master.text() or "").strip()
+        test_pw = pw or ADMIN_MASTER_PASSWORD
+
+        def _probe(candidate: str) -> bool:
+            try:
+                r = requests.post(
+                    f"{base.rstrip('/')}/api/v1/admin/users/list",
+                    json=_admin_merge_json({}, candidate),
+                    headers=_admin_token_headers(candidate),
+                    timeout=18,
+                )
+                return r.status_code == 200
+            except requests.RequestException:
+                return False
+
+        if _probe(test_pw):
+            return
+        if pw != ADMIN_MASTER_PASSWORD and _probe(ADMIN_MASTER_PASSWORD):
+            self.ed_admin_master.setText(ADMIN_MASTER_PASSWORD)
+            self._settings.setValue("admin_master_pw", ADMIN_MASTER_PASSWORD)
+            _log(
+                "Admin-Passwort auf gültigen IONOS-Standard zurückgesetzt "
+                f"(HTTP 403 mit altem Eintrag: {pw[:3]}…)."
+            )
+
     def _executive_superadmin_handshake(self) -> None:
-        """SuperAdmin-Whitelist (info + BigMaq) → Volllizenz + Admin-Rechte."""
+        """SuperAdmin-Whitelist (ENV) → Volllizenz + Admin-Rechte."""
         email = GLOBAL_SUPERADMIN_EMAIL
         if email not in GLOBAL_SUPERADMIN_EMAILS:
             email = next(iter(GLOBAL_SUPERADMIN_EMAILS), email)
@@ -789,7 +827,7 @@ class AdminCommanderWindow(QMainWindow):
         if not email or not password:
             return
         self._superadmin_executive = True
-        if hasattr(self, "ed_admin_master"):
+        if hasattr(self, "ed_admin_master") and password:
             self.ed_admin_master.setText(password)
             self._settings.setValue("admin_master_pw", password)
         base = (self.ed_ionos_api.text().strip() if hasattr(self, "ed_ionos_api") else "") or IONOS_SERVER_URL
@@ -1425,8 +1463,131 @@ class AdminCommanderWindow(QMainWindow):
         self.lbl_stresstest.setWordWrap(True)
         st_l.addWidget(self.lbl_stresstest)
         lay.addWidget(st_g)
+        perf_g = QGroupBox("🖥 IONOS Performance-Matrix (Live)")
+        perf_g.setStyleSheet(
+            "QGroupBox { color: #8ac7ff; font-weight: 800; border: 2px solid #00a2ff; "
+            "border-radius: 10px; margin-top: 12px; padding-top: 14px; }"
+        )
+        perf_l = QVBoxLayout(perf_g)
+        self.lbl_server_perf = QLabel("CPU: — · RAM: — · Disk frei: —")
+        self.lbl_server_perf.setWordWrap(True)
+        self.lbl_server_perf.setStyleSheet("color: #cfd8dc; font-size: 13px;")
+        perf_l.addWidget(self.lbl_server_perf)
+        self.pb_server_perf = QProgressBar()
+        self.pb_server_perf.setRange(0, 100)
+        self.pb_server_perf.setFormat("CPU %p%")
+        self.pb_server_perf.setStyleSheet(
+            "QProgressBar { border: 1px solid #00a2ff; background: #0b0f19; height: 22px; }"
+            "QProgressBar::chunk { background: #00a2ff; }"
+        )
+        perf_l.addWidget(self.pb_server_perf)
+        self.pb_server_ram = QProgressBar()
+        self.pb_server_ram.setRange(0, 100)
+        self.pb_server_ram.setFormat("RAM %p%")
+        self.pb_server_ram.setStyleSheet(
+            "QProgressBar { border: 1px solid #8ac7ff; background: #0b0f19; height: 22px; }"
+            "QProgressBar::chunk { background: #8ac7ff; }"
+        )
+        perf_l.addWidget(self.pb_server_ram)
+        lay.addWidget(perf_g)
+        dep_g = QGroupBox("⚡ IONOS Hotfix-Deployment")
+        dep_g.setStyleSheet(
+            "QGroupBox { color: #ffd54f; font-weight: 900; border: 2px solid #d4af37; "
+            "border-radius: 10px; margin-top: 12px; padding-top: 14px; }"
+        )
+        dep_l = QVBoxLayout(dep_g)
+        self.btn_hotfix_deploy = QPushButton(
+            "[ ⚡ ZÜNDE HOTFIX-DEPLOYMENT LIVE AUF IONOS ]"
+        )
+        self.btn_hotfix_deploy.setStyleSheet(
+            "QPushButton { background:#1a1208; color:#ffd700; border:2px solid #d4af37; "
+            "font-weight:900; padding:14px; border-radius:10px; }"
+            "QPushButton:hover { background:#2a1a08; }"
+        )
+        self.btn_hotfix_deploy.clicked.connect(self._trigger_hotfix_deploy)
+        dep_l.addWidget(self.btn_hotfix_deploy)
+        self.lbl_hotfix_deploy = QLabel("Deploy: bereit")
+        self.lbl_hotfix_deploy.setWordWrap(True)
+        dep_l.addWidget(self.lbl_hotfix_deploy)
+        lay.addWidget(dep_g)
+        self._perf_timer = QTimer(self)
+        self._perf_timer.timeout.connect(self._refresh_server_performance)
+        self._perf_timer.start(1000)
+        QTimer.singleShot(300, self._refresh_server_performance)
         lay.addStretch()
         self.tabs.addTab(w, "Wirtschaft global")
+
+    def _trigger_hotfix_deploy(self) -> None:
+        base = self._ionos_base_url()
+        pw = (self.ed_admin_master.text() or "").strip() if hasattr(self, "ed_admin_master") else ""
+        if not base or not pw:
+            QMessageBox.warning(self, "Deploy", "IONOS-URL und Admin-Passwort erforderlich.")
+            return
+        self.lbl_hotfix_deploy.setText("Deploy: läuft…")
+        self.btn_hotfix_deploy.setEnabled(False)
+        try:
+            r = requests.post(
+                f"{base}/api/v1/admin/deploy/execute",
+                json={"admin_master_password": pw, "admin_password": pw},
+                timeout=25,
+                headers={"User-Agent": "SkyTycoon-AdminCommander/1.0"},
+            )
+            j = r.json() if r.content else {}
+            msg = (
+                j.get("message_de")
+                or j.get("message_en")
+                or j.get("status")
+                or f"HTTP {r.status_code}"
+            )
+            self.lbl_hotfix_deploy.setText(f"Deploy: {msg}")
+            if r.status_code < 400:
+                QMessageBox.information(self, "Deploy", str(msg))
+            else:
+                QMessageBox.warning(self, "Deploy", str(msg))
+        except requests.RequestException as exc:
+            self.lbl_hotfix_deploy.setText(f"Deploy: Fehler — {exc}")
+            QMessageBox.critical(self, "Deploy", str(exc))
+        finally:
+            self.btn_hotfix_deploy.setEnabled(True)
+
+    def _refresh_server_performance(self) -> None:
+        base = self._ionos_base_url()
+        pw = (self.ed_admin_master.text() or "").strip() if hasattr(self, "ed_admin_master") else ""
+        if not base or not pw:
+            return
+        q = urlencode(
+            {
+                "admin_master_password": pw,
+                "admin_password": pw,
+            }
+        )
+        try:
+            r = requests.get(
+                f"{base}/api/v1/admin/server/performance?{q}",
+                timeout=8,
+                headers={"User-Agent": "SkyTycoon-AdminCommander/1.0"},
+            )
+            j = r.json() if r.content else {}
+        except requests.RequestException as exc:
+            self.lbl_server_perf.setText(f"Performance: offline ({exc})")
+            return
+        if not isinstance(j, dict) or not j.get("ok", True):
+            self.lbl_server_perf.setText(
+                f"Performance: {j.get('error', 'unavailable') if isinstance(j, dict) else 'error'}"
+            )
+            return
+        cpu = float(j.get("cpu_percent", j.get("cpu_usage", 0)) or 0)
+        ram = float(j.get("ram_percent", j.get("ram_usage", 0)) or 0)
+        disk_free = float(j.get("disk_free_gb", 0) or 0)
+        disk_total = float(j.get("disk_total_gb", 0) or 0)
+        ram_used = float(j.get("ram_used_gb", 0) or 0)
+        ram_total = float(j.get("ram_total_gb", 0) or 0)
+        self.pb_server_perf.setValue(int(max(0, min(100, cpu))))
+        self.pb_server_ram.setValue(int(max(0, min(100, ram))))
+        self.lbl_server_perf.setText(
+            f"CPU {cpu:.1f}% · RAM {ram:.1f}% ({ram_used:.1f}/{ram_total:.1f} GB) · "
+            f"Disk frei {disk_free:.1f} GB / {disk_total:.1f} GB"
+        )
 
     def _global_save(self) -> None:
         url = self.ed_global_url.text().strip()
@@ -3564,14 +3725,23 @@ class AdminCommanderWindow(QMainWindow):
         row = QHBoxLayout()
         self.admin_reply = QLineEdit()
         btn_reply = QPushButton("✉️ Antworten")
+        btn_hwid_reset = QPushButton(
+            "🔓 HWID-Slots steril nullen & Ticket schließen"
+        )
+        btn_hwid_reset.setStyleSheet(
+            "QPushButton { background:#1565c0; color:#fff; font-weight:800; padding:10px; }"
+        )
         row.addWidget(self.admin_reply, 1)
         row.addWidget(btn_reply)
         rl.addLayout(row)
+        rl.addWidget(btn_hwid_reset)
         split.addWidget(self.list_tickets)
         split.addWidget(right)
         split.setStretchFactor(1, 2)
         lay.addWidget(split, 1)
         self._support_sel_hid: str | None = None
+        self._support_sel_ticket_id: int = 0
+        self._support_sel_email: str = ""
         self._support_seen_msg: set[str] = set()
         self._support_boot = True
 
@@ -3622,11 +3792,16 @@ class AdminCommanderWindow(QMainWindow):
                 hid = str(head.get("hardware_id") or "")
                 if not hid:
                     continue
+                tid = int(head.get("id") or 0)
                 pilot = str(head.get("pilot_name", "?"))[:40]
+                uem = str(head.get("user_email") or "")[:80]
                 bell = "🔔 " if st == "open" else ""
-                lab = f"{bell}{pilot} · {hid} · {st.upper()}"
+                lab = f"{bell}#{tid} {pilot} · {st.upper()}"
                 it = QListWidgetItem(lab)
-                it.setData(Qt.ItemDataRole.UserRole, hid)
+                it.setData(
+                    Qt.ItemDataRole.UserRole,
+                    {"hid": hid, "ticket_id": tid, "email": uem},
+                )
                 self.list_tickets.addItem(it)
             self.list_tickets.blockSignals(False)
             if cur_txt:
@@ -3641,8 +3816,15 @@ class AdminCommanderWindow(QMainWindow):
                 self.chat_view.clear()
                 self._support_sel_hid = None
                 return
-            hid = str(it.data(Qt.ItemDataRole.UserRole) or "")
-            self._support_sel_hid = hid
+            raw = it.data(Qt.ItemDataRole.UserRole)
+            if isinstance(raw, dict):
+                self._support_sel_hid = str(raw.get("hid") or "")
+                self._support_sel_ticket_id = int(raw.get("ticket_id") or 0)
+                self._support_sel_email = str(raw.get("email") or "")
+            else:
+                self._support_sel_hid = str(raw or "")
+                self._support_sel_ticket_id = 0
+                self._support_sel_email = ""
             self._support_seen_msg.clear()
             self._support_boot = True
             base = self._ionos_base_url()
@@ -3710,6 +3892,60 @@ class AdminCommanderWindow(QMainWindow):
                 who = "Admin" if sender == "admin" else "User"
                 self.chat_view.append(f"<b>{who}</b>: {mtxt}")
 
+        def send_hwid_reset() -> None:
+            hid = self._support_sel_hid
+            if not hid:
+                QMessageBox.information(
+                    self, "Support", "Bitte zuerst ein Ticket auswählen."
+                )
+                return
+            txt = self.admin_reply.text().strip()
+            if not txt:
+                txt = (
+                    "HWID slots reset. / Ihre HWID-Slots wurden zurückgesetzt."
+                )
+            base = self._ionos_base_url()
+            pw = self._admin_master_pw()
+            if not base or not pw:
+                return
+            ticket_id = int(getattr(self, "_support_sel_ticket_id", 0) or 0)
+            email = str(getattr(self, "_support_sel_email", "") or "")
+
+            class _HwidResetRun(QRunnable):
+                def __init__(self, outer: Any) -> None:
+                    super().__init__()
+                    self.outer = outer
+
+                def run(self) -> None:
+                    try:
+                        requests.post(
+                            f"{base}/api/v1/admin/user/reset_hwid",
+                            json=_admin_merge_json(
+                                {
+                                    "ticket_id": ticket_id,
+                                    "hardware_id": hid,
+                                    "user_email": email,
+                                    "admin_response": txt[:8000],
+                                },
+                                pw,
+                            ),
+                            headers={
+                                **hdr_json,
+                                **_admin_token_headers(pw),
+                            },
+                            timeout=25,
+                        )
+                    except Exception as exc:
+                        print(f"[Admin] HWID reset: {exc!s}", flush=True)
+
+            QThreadPool.globalInstance().start(_HwidResetRun(self))
+            QMessageBox.information(
+                self,
+                "Support",
+                "HWID-Reset & Ticket-Abschluss an Server gesendet.",
+            )
+            refresh_tickets()
+
         def send_admin() -> None:
             hid = self._support_sel_hid
             txt = self.admin_reply.text().strip()
@@ -3728,6 +3964,7 @@ class AdminCommanderWindow(QMainWindow):
 
         self.list_tickets.currentItemChanged.connect(lambda _a, _b: load_chat())
         btn_reply.clicked.connect(send_admin)
+        btn_hwid_reset.clicked.connect(send_hwid_reset)
         t1 = QTimer(self)
         t1.setInterval(8000)
         t1.timeout.connect(refresh_tickets)
@@ -4016,7 +4253,7 @@ class AdminCommanderWindow(QMainWindow):
         lay.addWidget(QLabel("📧 Empfänger PayPal E-Mail / Recipient Email:"))
         self.ed_payout_email = QLineEdit()
         self.ed_payout_email.setPlaceholderText(
-            "z.B. bigmaq@skytycoon.info oder flexible PayPal-Adresse…"
+            "Empfänger-PayPal-Adresse (frei wählbar)…"
         )
         lay.addWidget(self.ed_payout_email)
         lay.addWidget(QLabel("💰 Auszahlungsbetrag (EUR):"))

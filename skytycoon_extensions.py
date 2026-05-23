@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html as html_module
 import json
 import os
 import re
@@ -17,7 +18,20 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from PySide6.QtCore import QEvent, QObject, QRunnable, QThreadPool, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import (
+    Q_ARG,
+    QEvent,
+    QMetaObject,
+    QObject,
+    QRunnable,
+    QThread,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    Qt,
+    Signal,
+    Slot,
+)
 from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
@@ -47,6 +61,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextBrowser,
     QTextEdit,
     QToolBar,
     QVBoxLayout,
@@ -147,10 +162,14 @@ def _patch_simconnect_telemetry_regulation(main_mod: Any) -> None:
                 snap: dict[str, object] = {}
                 try:
                     for name in poll_names:
-                        snap[name] = self._aq.get(name)
-                    self.snapshot_ready.emit(snap)
-                except Exception as exc:
-                    self.poll_error.emit(exc)
+                        try:
+                            snap[name] = self._aq.get(name)
+                        except Exception:
+                            continue
+                    if snap:
+                        self.snapshot_ready.emit(snap)
+                except Exception:
+                    pass
                 self.msleep(SIMCONNECT_TELEMETRY_MS)
 
         th_cls.run = _run_sim_poll_slow
@@ -165,11 +184,15 @@ def _patch_simconnect_telemetry_regulation(main_mod: Any) -> None:
         self._platin_sim_gui_apply_mono = now
         prev_title = str(getattr(self, "_platin_snap_title_key", "") or "")
         prev_phase = str(getattr(self, "_platin_snap_phase_key", "") or "")
-        orig_apply(self)
+        try:
+            orig_apply(self)
+        except Exception:
+            return
         title_key = str(getattr(self, "_last_title", "") or "").strip()[:120]
         phase_key = str(
             getattr(getattr(self, "_phase", None), "value", "") or ""
         ).strip()
+        _platin_forward_simconnect_cloud(self, phase_key)
         lbl_ac = getattr(self, "label_aircraft", None)
         lbl_ph = getattr(self, "label_phase", None)
         if title_key == prev_title and lbl_ac is not None:
@@ -266,7 +289,18 @@ GSX_POLL_MS = 3000
 SIMCONNECT_TELEMETRY_MS = 2000
 PLATIN_CABIN_DEFAULT_VOL = 75
 PLATIN_MIN_REAL_AUDIO_BYTES = 45_000
-PLATIN_BUILD = "20260526-online-login-v27"
+PLATIN_BUILD = "20260523-platin-ram-v46"
+_PLATIN_CRASH_MONSTER_DEAD_MSG = "BÄM — DAS CRASH-MONSTER IST TOT!"
+_PLATIN_V46_TRESOR_BAM_MSG = (
+    "BÄM — DER GEISTER-CACHE IST MAUSETOT UND DER RAM-CORE LÄUFT!"
+)
+_PLATIN_TRESOR_BAM_PRINTED = False
+_PLATIN_RAM_JWT_ATTRS: tuple[str, ...] = (
+    "session_jwt_token",
+    "ionos_jwt",
+    "access_token",
+    "session_token",
+)
 PLATIN_HAUL_NM_THRESHOLD = 1500.0
 _PLATIN_SPLASH_UPDATE_ONCE = True
 _PLATIN_PREMAIN_AUTH_OK = False
@@ -293,7 +327,9 @@ _RADAR_DEFAULT_LAT = 50.0379
 _RADAR_DEFAULT_LON = 8.5622
 _CLOUD_API_FALLBACK = "https://skytycoon.info"
 _CLOUD_API_FALLBACK_IP = "https://217.154.16.248"
-GLOBAL_SUPERADMIN_EMAIL = "info@skytycoon.info"
+def _superadmin_emails_from_env() -> frozenset[str]:
+    raw = (os.environ.get("SKYTYCOON_SUPERADMIN_EMAILS") or "").strip()
+    return frozenset(x.strip().lower() for x in raw.split(",") if x.strip())
 
 
 def _is_local_api_url(url: str) -> bool:
@@ -557,6 +593,34 @@ class _PlatinAsyncBus(QObject):
     charter_api_fail = Signal(str)
     pax_feedback_ready = Signal(object)
     p2p_board_ready = Signal(object)
+    thin_tab_ready = Signal(str, object)
+    thin_tab_fail = Signal(str, str)
+    sse_tick = Signal(object)
+    html_page_ready = Signal(str, str, int)
+    html_page_fail = Signal(str, str)
+    profit_svg_ready = Signal(str)
+    profit_svg_fail = Signal(str)
+
+    @Slot(str, str, int)
+    def deliver_html_page(self, view_key: str, html: str, page: int) -> None:
+        """Nur Hauptthread: QTextBrowser / Widget-Mount (nie aus QThreadPool/QNetworkReply)."""
+        win = self.parent()
+        if win is None:
+            return
+        inj = getattr(win, "_platin_injector", None)
+        if inj is None:
+            return
+        inj._apply_html_page_main_thread(view_key, html, page)
+
+    @Slot(str)
+    def deliver_profit_svg(self, svg_text: str) -> None:
+        win = self.parent()
+        if win is None:
+            return
+        inj = getattr(win, "_platin_injector", None)
+        if inj is None:
+            return
+        inj._apply_profit_svg_main_thread(svg_text)
 
 
 class _FnRunnable(QRunnable):
@@ -615,6 +679,610 @@ class _CharterApiRunnable(QRunnable):
             )
         except (requests.RequestException, json.JSONDecodeError, ValueError) as exc:
             inj._safe_bus_emit(inj._bus.charter_api_fail, str(exc))
+
+
+class _PlatinUiBridge(QObject):
+    """Hauptthread-Callback für Thin-Client UI (QMetaObject.invokeMethod)."""
+
+    __slots__ = ("_fn",)
+
+    def __init__(self, fn: Any) -> None:
+        super().__init__()
+        self._fn = fn
+
+    @Slot()
+    def invoke(self) -> None:
+        fn = self._fn
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+
+
+def _platin_invoke_on_main_thread(win: Any, fn: Any) -> None:
+    if not callable(fn):
+        return
+    app = QApplication.instance()
+    if app is None:
+        try:
+            fn()
+        except Exception:
+            pass
+        return
+    if QThread.currentThread() is app.thread():
+        try:
+            fn()
+        except Exception:
+            pass
+        return
+    bridge = _PlatinUiBridge(fn)
+    bridge.moveToThread(app.thread())
+    QMetaObject.invokeMethod(bridge, "invoke", Qt.ConnectionType.QueuedConnection)
+
+
+def _platin_find_active_main_window(main_mod: Any) -> Any | None:
+    app = QApplication.instance()
+    if app is None:
+        return None
+    win_cls = getattr(main_mod, "MainWindow", None)
+    for widget in app.topLevelWidgets():
+        if win_cls is not None and isinstance(widget, win_cls):
+            return widget
+    return None
+
+
+def _platin_ram_jwt_from_win(win: Any | None) -> str:
+    """JWT ausschließlich aus flüchtigem MainWindow-RAM — niemals SQLite/JSON."""
+    if win is None:
+        return ""
+    for attr in _PLATIN_RAM_JWT_ATTRS:
+        tok = str(getattr(win, attr, "") or "").strip()
+        if tok:
+            return tok[:4096]
+    return ""
+
+
+def _platin_set_jwt_ram(win: Any | None, token: str) -> str:
+    """Server-JWT nur im RAM verankern (session_jwt_token + Aliase)."""
+    tok = str(token or "").strip()[:4096]
+    if win is None:
+        return tok
+    for attr in _PLATIN_RAM_JWT_ATTRS:
+        try:
+            setattr(win, attr, tok)
+        except Exception:
+            pass
+    return tok
+
+
+def _platin_erase_ghost_login_ram(win: Any | None) -> None:
+    """Geister-Login-Reste aus dem Arbeitsspeicher tilgen."""
+    if win is None:
+        return
+    for attr in (
+        "session_jwt_token",
+        "ionos_jwt",
+        "access_token",
+        "session_token",
+        "session_username",
+        "session_password",
+        "portal_email",
+        "cloud_password",
+        "_platin_pending_login_json",
+        "_platin_login_user",
+        "_profile_cloud_last",
+    ):
+        try:
+            setattr(win, attr, "")
+        except Exception:
+            pass
+
+
+def _platin_v46_tresor_sweep(
+    main_mod: Any | None,
+    db_path: Any,
+    win: Any | None,
+    *,
+    announce: bool = False,
+) -> None:
+    """Disk-Session + SQLite-JWT-Geister restlos — RAM-Core für frischen Start."""
+    global _PLATIN_TRESOR_BAM_PRINTED
+    _kaltstart_nuke_login_tresor(main_mod, db_path)
+    if main_mod is not None and db_path is not None:
+        try:
+            main_mod.app_meta_set(db_path, "ionos_jwt", "")
+        except Exception:
+            pass
+    keep_ram = False
+    if win is not None:
+        keep_ram = bool(
+            _PLATIN_PREMAIN_AUTH_OK
+            or getattr(win, "_platin_auth_gate_done", False)
+            or getattr(win, "_platin_coldstart_login_complete", False)
+            or _platin_ram_jwt_from_win(win)
+        )
+        if not keep_ram:
+            _platin_erase_ghost_login_ram(win)
+    if announce and not _PLATIN_TRESOR_BAM_PRINTED:
+        _PLATIN_TRESOR_BAM_PRINTED = True
+        print(f"[SkyTycoon] {_PLATIN_V46_TRESOR_BAM_MSG} ({PLATIN_BUILD})", flush=True)
+
+
+def _platin_resolve_jwt_token(
+    main_mod: Any, db_path: Any, win: Any | None = None
+) -> str:
+    """JWT: 100 % RAM (session_jwt_token) — kein SQLite/JSON-Fallback."""
+    _ = main_mod, db_path
+    if win is None:
+        win = _platin_find_active_main_window(main_mod)
+    return _platin_ram_jwt_from_win(win)
+
+
+def _platin_sterile_wipe_layout(target: QWidget | None) -> None:
+    """Platzhalter/Altpanel restlos entfernen — kein doppeltes Layout (Qt-Crash-Schutz)."""
+    if target is None:
+        return
+    try:
+        from platin_alliance_center import sterile_purge_widget_layout
+
+        sterile_purge_widget_layout(target)
+        return
+    except Exception:
+        pass
+    lay = target.layout()
+    if lay is None:
+        return
+    while lay.count():
+        item = lay.takeAt(0)
+        if item is None:
+            continue
+        child = item.widget()
+        if child is not None:
+            child.setParent(None)
+            child.deleteLater()
+
+
+def _platin_deliver_html_to_main_thread(
+    inj: "_PlatinInjector", view_key: str, html: str, page: int
+) -> None:
+    """HTML-MIME ausschließlich per QMetaObject → _PlatinAsyncBus (Hauptthread)."""
+    if not _qt_widget_alive(inj.win):
+        return
+    bus = inj._bus
+    QMetaObject.invokeMethod(
+        bus,
+        "deliver_html_page",
+        Qt.ConnectionType.QueuedConnection,
+        Q_ARG(str, str(view_key)),
+        Q_ARG(str, html or ""),
+        Q_ARG(int, int(page or 1)),
+    )
+
+
+def _platin_deliver_profit_svg_to_main_thread(
+    inj: "_PlatinInjector", svg_text: str
+) -> None:
+    if not _qt_widget_alive(inj.win):
+        return
+    bus = inj._bus
+    QMetaObject.invokeMethod(
+        bus,
+        "deliver_profit_svg",
+        Qt.ConnectionType.QueuedConnection,
+        Q_ARG(str, svg_text or ""),
+    )
+
+
+def _platin_anchor_jwt_on_parent(
+    main_mod: Any,
+    db_path: Any,
+    payload: dict[str, Any] | None,
+    *,
+    dlg: Any | None = None,
+    win: Any | None = None,
+) -> str:
+    """JWT auf parent_window / parent.ionos_jwt (StartupAuthDialog → MainWindow)."""
+    parent = win
+    if parent is None and dlg is not None:
+        parent = getattr(dlg, "parent_window", None) or dlg.parent()
+    tok = _platin_anchor_jwt_ram(main_mod, db_path, payload, win=parent)
+    if dlg is not None and tok:
+        _platin_set_jwt_ram(dlg, tok)
+    return tok
+
+
+def _platin_anchor_jwt_ram(
+    main_mod: Any,
+    db_path: Any,
+    payload: dict[str, Any] | None,
+    *,
+    win: Any | None = None,
+) -> str:
+    """POST /api/v1/auth/login → session_jwt_token (RAM-only, kein SQLite/JSON)."""
+    _ = main_mod, db_path
+    if not isinstance(payload, dict):
+        payload = {}
+    tok = str(
+        payload.get("access_token")
+        or payload.get("session_token")
+        or payload.get("token")
+        or ""
+    ).strip()
+    if not tok:
+        if win is None:
+            win = _platin_find_active_main_window(main_mod)
+        tok = _platin_ram_jwt_from_win(win)
+    if not tok:
+        return ""
+    if win is None:
+        win = _platin_find_active_main_window(main_mod)
+    return _platin_set_jwt_ram(win, tok)
+
+
+def _platin_bearer_headers(
+    main_mod: Any, db_path: Any, win: Any | None = None, *, extra: dict[str, str] | None = None
+) -> dict[str, str]:
+    headers: dict[str, str] = {
+        "User-Agent": f"{main_mod.SKYTYCOON_APP_NAME}/{main_mod.APP_VERSION}",
+        "Accept-Encoding": "gzip, deflate",
+    }
+    if extra:
+        headers.update(extra)
+    tok = _platin_resolve_jwt_token(main_mod, db_path, win)
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    return headers
+
+
+def _platin_inject_bearer_on_qt_request(req: Any, main_mod: Any, db_path: Any, win: Any) -> Any:
+    tok = _platin_resolve_jwt_token(main_mod, db_path, win)
+    if tok:
+        try:
+            req.setRawHeader(b"Authorization", f"Bearer {tok}".encode("ascii"))
+        except (RuntimeError, AttributeError, TypeError):
+            pass
+    return _platin_nam_gzip_headers(req)
+
+
+def _arm_platin_nam_bearer(win: Any, main_mod: Any) -> None:
+    """QNetworkAccessManager: Authorization Bearer bei jedem get/post."""
+    nam = getattr(win, "_nam", None)
+    if nam is None or getattr(nam, "_platin_bearer_v46", False):
+        return
+    db_path = getattr(main_mod, "DB_PATH", None)
+
+    def _wrap(orig: Any):
+        def _call(req: Any, *args: Any, **kwargs: Any) -> Any:
+            if db_path is not None:
+                _platin_inject_bearer_on_qt_request(req, main_mod, db_path, win)
+            return orig(req, *args, **kwargs)
+
+        return _call
+
+    nam.get = _wrap(nam.get)  # type: ignore[method-assign]
+    nam.post = _wrap(nam.post)  # type: ignore[method-assign]
+    nam._platin_bearer_v46 = True
+
+
+class _ThinTabFetchRunnable(QRunnable):
+    """Schwere Tab-Daten vom IONOS-Server (0% lokale Berechnung)."""
+
+    __slots__ = ("_inj", "_tab_key")
+
+    def __init__(self, injector: "_PlatinInjector", tab_key: str) -> None:
+        super().__init__()
+        self._inj = injector
+        self._tab_key = tab_key
+
+    def run(self) -> None:
+        inj = self._inj
+        base = inj._api_base()
+        if not base:
+            inj._safe_bus_emit(inj._bus.thin_tab_fail, self._tab_key, "no_server_url")
+            return
+        headers = dict(inj._headers())
+        headers["Accept-Encoding"] = "gzip, deflate"
+        try:
+            r = requests.get(
+                f"{base}/api/v1/client/thin/tab/{self._tab_key}",
+                headers=headers,
+                timeout=22,
+                verify=inj.m.auth_requests_verify_tls(),
+            )
+            data = r.json() if r.content else {}
+            if not isinstance(data, dict):
+                data = {"ok": False}
+            inj._safe_bus_emit(inj._bus.thin_tab_ready, self._tab_key, data)
+        except (requests.RequestException, json.JSONDecodeError, ValueError) as exc:
+            inj._safe_bus_emit(inj._bus.thin_tab_fail, self._tab_key, str(exc))
+
+
+class _PlatinSseHeartbeatRunnable(QRunnable):
+    """SSE GET /api/v1/telemetry/heartbeat — 1 Hz Server-Takt."""
+
+    __slots__ = ("_inj",)
+
+    def __init__(self, injector: "_PlatinInjector") -> None:
+        super().__init__()
+        self._inj = injector
+
+    def run(self) -> None:
+        inj = self._inj
+        base = inj._api_base()
+        if not base:
+            return
+        headers = dict(inj._headers())
+        headers["Accept"] = "text/event-stream"
+        try:
+            with requests.get(
+                f"{base}/api/v1/telemetry/heartbeat",
+                headers=headers,
+                stream=True,
+                timeout=90,
+                verify=inj.m.auth_requests_verify_tls(),
+            ) as resp:
+                if resp.status_code >= 400:
+                    return
+                for raw in resp.iter_lines(decode_unicode=True):
+                    if not raw or not str(raw).startswith("data:"):
+                        continue
+                    blob = str(raw)[5:].strip()
+                    if not blob:
+                        continue
+                    try:
+                        payload = json.loads(blob)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(payload, dict):
+                        inj._safe_bus_emit(inj._bus.sse_tick, payload)
+        except requests.RequestException:
+            return
+
+
+class _HtmlPageFetchRunnable(QRunnable):
+    """Server-HTML (gzip) — 0% lokale QTableWidget-Schleifen."""
+
+    __slots__ = ("_inj", "_view_key", "_page", "_extra_qs")
+
+    def __init__(
+        self,
+        injector: "_PlatinInjector",
+        view_key: str,
+        page: int = 1,
+        extra_qs: str = "",
+    ) -> None:
+        super().__init__()
+        self._inj = injector
+        self._view_key = view_key
+        self._page = max(1, int(page or 1))
+        self._extra_qs = extra_qs or ""
+
+    def run(self) -> None:
+        inj = self._inj
+        base = inj._api_base()
+        if not base:
+            inj._safe_bus_emit(
+                inj._bus.html_page_fail, self._view_key, "no_server_url"
+            )
+            return
+        lang = inj._ui_lang_code()
+        url = (
+            f"{base}/api/v1/client/html/{self._view_key}"
+            f"?page={self._page}&lang={lang}{self._extra_qs}"
+        )
+        headers = dict(inj._headers())
+        headers["Accept"] = "text/html,application/xhtml+xml"
+        headers["Accept-Encoding"] = "gzip, deflate"
+        try:
+            r = requests.get(
+                url,
+                headers=headers,
+                timeout=24,
+                verify=inj.m.auth_requests_verify_tls(),
+            )
+            html = r.text if r.content else ""
+            if r.status_code >= 400:
+                inj._safe_bus_emit(
+                    inj._bus.html_page_fail,
+                    self._view_key,
+                    f"HTTP {r.status_code}",
+                )
+                return
+            _platin_deliver_html_to_main_thread(
+                inj, self._view_key, html, self._page
+            )
+        except (requests.RequestException, UnicodeError) as exc:
+            inj._safe_bus_emit(inj._bus.html_page_fail, self._view_key, str(exc))
+
+
+class _ProfitSvgFetchRunnable(QRunnable):
+    __slots__ = ("_inj",)
+
+    def __init__(self, injector: "_PlatinInjector") -> None:
+        super().__init__()
+        self._inj = injector
+
+    def run(self) -> None:
+        inj = self._inj
+        base = inj._api_base()
+        if not base:
+            inj._safe_bus_emit(inj._bus.profit_svg_fail, "no_server")
+            return
+        lang = inj._ui_lang_code()
+        headers = dict(inj._headers())
+        headers["Accept-Encoding"] = "gzip, deflate"
+        try:
+            r = requests.get(
+                f"{base}/api/v1/client/chart/profit.svg?lang={lang}",
+                headers=headers,
+                timeout=20,
+                verify=inj.m.auth_requests_verify_tls(),
+            )
+            if r.status_code >= 400:
+                inj._safe_bus_emit(inj._bus.profit_svg_fail, f"HTTP {r.status_code}")
+                return
+            _platin_deliver_profit_svg_to_main_thread(inj, r.text or "")
+        except requests.RequestException as exc:
+            inj._safe_bus_emit(inj._bus.profit_svg_fail, str(exc))
+
+
+class _SimConnectCloudRunnable(QRunnable):
+    __slots__ = ("_inj", "_payload")
+
+    def __init__(self, injector: "_PlatinInjector", payload: dict[str, Any]) -> None:
+        super().__init__()
+        self._inj = injector
+        self._payload = payload
+
+    def run(self) -> None:
+        inj = self._inj
+        base = inj._api_base()
+        if not base:
+            return
+        body = dict(inj.m.build_ionos_cloud_sync_body(inj.db_path, pull_only=True))
+        body.update(self._payload)
+        headers = dict(inj._headers())
+        headers["Content-Type"] = "application/json"
+        try:
+            requests.post(
+                f"{base}/api/v1/telemetry/stream",
+                json=body,
+                headers=headers,
+                timeout=8,
+                verify=inj.m.auth_requests_verify_tls(),
+            )
+        except requests.RequestException:
+            return
+
+
+class _CloudErrorLogRunnable(QRunnable):
+    __slots__ = ("_inj", "_message", "_source")
+
+    def __init__(self, injector: "_PlatinInjector", message: str, source: str) -> None:
+        super().__init__()
+        self._inj = injector
+        self._message = message
+        self._source = source
+
+    def run(self) -> None:
+        inj = self._inj
+        base = inj._api_base()
+        if not base or not self._message:
+            return
+        body = {
+            "message": self._message,
+            "source": self._source,
+            "hardware_id": _normalize_client_hwid(inj.m, inj.db_path),
+        }
+        headers = dict(inj._headers())
+        headers["Content-Type"] = "application/json"
+        try:
+            requests.post(
+                f"{base}/api/v1/admin/logs/error",
+                json=body,
+                headers=headers,
+                timeout=10,
+                verify=inj.m.auth_requests_verify_tls(),
+            )
+        except requests.RequestException:
+            return
+
+
+class _PlatinAssetCacheRunnable(QRunnable):
+    """Airline-Wappen via CDN → QPixmapCache (RAM)."""
+
+    __slots__ = ("_codes",)
+
+    def __init__(self, codes: tuple[str, ...] = ("EDW", "SWR", "DLH", "EWG")) -> None:
+        super().__init__()
+        self._codes = codes
+
+    def run(self) -> None:
+        try:
+            from PySide6.QtGui import QPixmap, QPixmapCache
+        except ImportError:
+            return
+        for code in self._codes:
+            url = f"https://skytycoon.info/static/assets/logos/{code}.png"
+            try:
+                r = requests.get(url, timeout=12)
+                if r.status_code >= 400 or not r.content:
+                    continue
+                px = QPixmap()
+                if px.loadFromData(r.content):
+                    QPixmapCache.insert(f"platin_logo_{code}", px)
+            except requests.RequestException:
+                continue
+
+
+class _PlatinCloudHtmlPanel(QWidget):
+    """QTextBrowser-Spiegel für Server-HTML."""
+
+    __slots__ = ("_inj", "_view_key", "_page", "_browser", "_haul_qs")
+
+    def __init__(
+        self,
+        injector: "_PlatinInjector",
+        view_key: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._inj = injector
+        self._view_key = view_key
+        self._page = 1
+        self._haul_qs = ""
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._browser = QTextBrowser(self)
+        self._browser.setOpenExternalLinks(False)
+        self._browser.setStyleSheet(
+            f"QTextBrowser{{background:{PLATIN_CYBER_COLORS['bg']};"
+            f"border:1px solid #1a2a3d;color:{PLATIN_CYBER_COLORS['ice']};}}"
+        )
+        lay.addWidget(self._browser, 1)
+        self._browser.anchorClicked.connect(self._on_anchor)
+
+    def set_haul_query(self, qs: str) -> None:
+        self._haul_qs = qs or ""
+
+    def load_page(self, page: int = 1) -> None:
+        self._page = max(1, int(page or 1))
+        self._inj._pool().start(
+            _HtmlPageFetchRunnable(
+                self._inj, self._view_key, self._page, self._haul_qs
+            )
+        )
+
+    def set_html(self, html: str) -> None:
+        if not html:
+            return
+        QMetaObject.invokeMethod(
+            self,
+            "_slot_set_html",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(str, html),
+        )
+
+    @Slot(str)
+    def _slot_set_html(self, html: str) -> None:
+        """QTextBrowser.setHtml — ausschließlich per QMetaObject (Hauptthread)."""
+        if not html or not _qt_widget_alive(self._browser):
+            return
+        try:
+            self._browser.document().clear()
+        except (RuntimeError, AttributeError):
+            pass
+        self._browser.setHtml(html)
+
+    def _set_html_main_thread(self, html: str) -> None:
+        self._slot_set_html(html)
+
+    def _on_anchor(self, url: QUrl) -> None:
+        qs = bytes(url.query()).decode("utf-8", errors="replace")
+        m = re.search(r"page=(\d+)", qs)
+        if m:
+            self.load_page(int(m.group(1)))
 
 
 class _RadarHeartbeatRunnable(QRunnable):
@@ -1004,6 +1672,50 @@ def _resolve_portal_email_from_login(
     return em[:200] if "@" in em else ""
 
 
+def _mask_email_for_log(email: str) -> str:
+    """Keine Klartext-E-Mails in Logs (DSGVO / keine Geister-Identitäten)."""
+    em = str(email or "").strip().lower()
+    if "@" not in em:
+        return "—"
+    local, domain = em.split("@", 1)
+    if len(local) <= 2:
+        masked_local = "*"
+    else:
+        masked_local = f"{local[0]}***{local[-1]}"
+    dom_parts = domain.split(".")
+    if dom_parts:
+        dom_parts[0] = dom_parts[0][:1] + "***" if dom_parts[0] else "***"
+    return f"{masked_local}@{'.'.join(dom_parts)}"
+
+
+def _sterile_clear_startup_auth_fields(dlg: Any) -> None:
+    """Leere Anmeldemaske — keine Meta-/Cache-Vorbelegung aus RAM."""
+    for attr in ("ed_login_name", "ed_login_email", "ed_login_pw", "ed_login_key"):
+        w = getattr(dlg, attr, None)
+        if w is not None and hasattr(w, "clear"):
+            try:
+                w.clear()
+            except RuntimeError:
+                pass
+    cb = getattr(dlg, "_platin_remember_cb", None)
+    if cb is not None:
+        cb.setChecked(False)
+
+
+def _platin_coldstart_sanitize_session(main_mod: Any, db_path: Any) -> None:
+    """Kaltstart: Disk-Tresor leeren + RAM-Login-Reste entfernen (keine Geister-Session)."""
+    _kaltstart_nuke_login_tresor(main_mod, db_path)
+    _clear_stale_login_identity(main_mod, db_path)
+    _sterile_clear_startup_auth_fields_if_visible(main_mod, db_path)
+
+
+def _sterile_clear_startup_auth_fields_if_visible(main_mod: Any, db_path: Any) -> None:
+    _ = db_path
+    for w in QApplication.topLevelWidgets():
+        if w.__class__.__name__ == "StartupAuthDialog":
+            _sterile_clear_startup_auth_fields(w)
+
+
 def _clear_stale_login_identity(main_mod: Any, db_path: Any) -> None:
     """Vor frischem Login: vorheriges Konto aus Session-Meta entfernen."""
     for key in (
@@ -1032,21 +1744,14 @@ def _platin_seal_login_session(
     *,
     pilot: str = "",
     password: str = "",
+    win: Any | None = None,
 ) -> None:
     """Nach login_success: JWT/Passwort/Pilot bombenfest im RAM + SQLite behalten."""
     if not isinstance(login_json, dict):
         login_json = {}
     local_hid = _normalize_client_hwid(main_mod, db_path, force_os=False)
     _bind_server_hardware_id(main_mod, db_path, login_json, local_hid)
-    _store_login_access_token(main_mod, db_path, login_json)
-    tok = str(
-        login_json.get("access_token")
-        or login_json.get("session_token")
-        or login_json.get("token")
-        or ""
-    ).strip()
-    if tok:
-        main_mod.app_meta_set(db_path, "ionos_jwt", tok[:4096])
+    _store_login_access_token(main_mod, db_path, login_json, win=win)
     pw = (password or "").strip()
     if pw:
         main_mod.cloud_password_set(db_path, pw)
@@ -1074,7 +1779,421 @@ def _platin_seal_login_session(
     if em:
         main_mod.app_meta_set(db_path, "portal_email", em)
         main_mod.app_meta_set(db_path, "career_bound_portal_email", em)
+    web_hid = str(
+        login_json.get("web_id")
+        or login_json.get("pc_hardware_id")
+        or login_json.get("hardware_id")
+        or ""
+    ).strip()[:128]
+    if web_hid:
+        main_mod.app_meta_set(db_path, "ionos_hardware_id", web_hid)
+        main_mod.app_meta_set(db_path, "econ_device_tag", web_hid[:64])
     main_mod.app_meta_set(db_path, "online_network_enabled", "1")
+    if win is None:
+        win = _platin_find_active_main_window(main_mod)
+    _platin_pull_user_profile_sync(main_mod, db_path, win)
+
+
+def _platin_has_valid_ionos_jwt(
+    main_mod: Any, db_path: Any, win: Any | None = None
+) -> bool:
+    return len(_platin_resolve_jwt_token(main_mod, db_path, win)) >= 12
+
+
+def _platin_inject_profile_cloud_credentials(
+    main_mod: Any, db_path: Any, win: Any | None = None
+) -> tuple[str, str]:
+    """
+    Portal-E-Mail + Cloud-Passwort aus der verifizierten Online-Session
+    in Meta/RAM spiegeln (Kundenprofil ohne Datei→Cloud-Passwort-Warnung).
+    """
+    em = (main_mod.app_meta_get(db_path, "portal_email", "") or "").strip().lower()
+    if not em or "@" not in em:
+        em = (
+            main_mod.app_meta_get(db_path, "career_bound_portal_email", "") or ""
+        ).strip().lower()
+    if (not em or "@" not in em) and win is not None:
+        em = (
+            str(getattr(win, "session_username", "") or getattr(win, "portal_email", "") or "")
+            .strip()
+            .lower()
+        )
+    pw = (main_mod.cloud_password_get(db_path) or "").strip()
+    if not pw and win is not None:
+        pw = (
+            str(
+                getattr(win, "session_password", None)
+                or getattr(win, "cloud_password", None)
+                or ""
+            ).strip()
+        )
+    if em and "@" in em:
+        try:
+            main_mod.app_meta_set(db_path, "portal_email", em[:200])
+            main_mod.app_meta_set(db_path, "career_bound_portal_email", em[:200])
+        except Exception:
+            pass
+    if pw:
+        try:
+            main_mod.cloud_password_set(db_path, pw)
+        except Exception:
+            pass
+    if win is not None:
+        try:
+            win.session_username = em
+            win.session_password = pw
+            win.portal_email = em
+            win.cloud_password = pw
+        except Exception:
+            pass
+    return em, pw
+
+
+def _platin_verify_session_transfer(main_mod: Any, db_path: Any) -> bool:
+    """Prüft Online-Session — JWT nur aus RAM, keine Geister aus SQLite/JSON."""
+    try:
+        from platin_cloud_only import ensure_platin_session_db
+
+        ensure_platin_session_db(main_mod)
+        db_path = main_mod.DB_PATH
+    except Exception:
+        pass
+    win = _platin_find_active_main_window(main_mod)
+    em = (main_mod.app_meta_get(db_path, "portal_email", "") or "").strip().lower()
+    jwt = _platin_ram_jwt_from_win(win)
+    pw = (main_mod.cloud_password_get(db_path) or "").strip()
+    hid = _normalize_client_hwid(main_mod, db_path)
+    ok = bool(em and "@" in em and (jwt or pw))
+    if (
+        ok
+        and jwt
+        and (_PLATIN_PREMAIN_AUTH_OK or getattr(main_mod, "_platin_user_logged_in", False))
+        and not getattr(main_mod, "_platin_session_transfer_logged", False)
+    ):
+        main_mod._platin_session_transfer_logged = True
+        print(
+            f"[SkyTycoon] Cloud-Session aktiv (RAM-JWT): {_mask_email_for_log(em)} · "
+            f"HWID {hid[:20]}…",
+            flush=True,
+        )
+    return ok
+
+
+def _platin_commit_premain_login(main_mod: Any, db_path: Any, dlg: Any) -> None:
+    """Nach StartupAuthDialog (vor MainWindow): Login fest in Session-DB schreiben."""
+    try:
+        from platin_cloud_only import ensure_platin_session_db
+
+        ensure_platin_session_db(main_mod)
+        db_path = main_mod.DB_PATH
+    except Exception:
+        pass
+    pending = getattr(dlg, "_platin_pending_login_json", None)
+    pilot = ""
+    pw = ""
+    if getattr(dlg, "ed_login_name", None) is not None:
+        pilot = dlg.ed_login_name.text().strip()
+    if getattr(dlg, "ed_login_pw", None) is not None:
+        pw = dlg.ed_login_pw.text().strip()
+    if isinstance(pending, dict) and pending:
+        _platin_seal_login_session(main_mod, db_path, pending, pilot=pilot, password=pw)
+    elif pilot and pw:
+        _platin_seal_login_session(
+            main_mod,
+            db_path,
+            {
+                "status": "login_success",
+                "email": pilot if "@" in pilot else "",
+            },
+            pilot=pilot,
+            password=pw,
+        )
+    try:
+        main_mod._platin_user_logged_in = True
+    except Exception:
+        pass
+    _platin_verify_session_transfer(main_mod, db_path)
+
+
+def _platin_should_fresh_cloud_sync(main_mod: Any, db_path: Any) -> bool:
+    """Nur bei neuem Portal-Konto lokale Karriere auf Server-Starter zurücksetzen."""
+    em = (main_mod.app_meta_get(db_path, "portal_email", "") or "").strip().lower()
+    if not em or "@" not in em:
+        return False
+    prof: dict[str, Any] = {"email": em, "credits": 0.0, "xp": 0.0}
+    try:
+        conn = main_mod._conn(db_path)
+        try:
+            row = conn.execute(
+                "SELECT credits, xp FROM pilot_stats WHERE id = 1;"
+            ).fetchone()
+            if row:
+                prof["credits"] = float(row[0] or 0)
+                prof["xp"] = float(row[1] or 0)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    try:
+        return bool(main_mod.portal_login_needs_local_starter_reset(db_path, em, prof))
+    except Exception:
+        return False
+
+
+def _platin_apply_profile_identity(
+    main_mod: Any, db_path: Any, win: Any, payload: dict[str, Any] | None
+) -> None:
+    """Cloud-Antwort → gleiche E-Mail/HWID wie skytycoon.info (Kundenkonto)."""
+    if not isinstance(payload, dict):
+        return
+    prof = payload.get("profile")
+    if not isinstance(prof, dict):
+        prof = payload
+    em = str(
+        prof.get("email")
+        or prof.get("portal_email")
+        or payload.get("email")
+        or payload.get("portal_email")
+        or ""
+    ).strip().lower()
+    if em and "@" in em:
+        main_mod.app_meta_set(db_path, "portal_email", em[:200])
+        main_mod.app_meta_set(db_path, "career_bound_portal_email", em[:200])
+    hid = str(
+        prof.get("hardware_id") or payload.get("hardware_id") or ""
+    ).strip()[:128]
+    if hid and hid.lower() != "unknown":
+        _bind_server_hardware_id(
+            main_mod, db_path, {"hardware_id": hid, "email": em, "portal_email": em}, hid
+        )
+    pilot = str(
+        prof.get("pilot_name")
+        or prof.get("username")
+        or prof.get("display_name")
+        or ""
+    ).strip()
+    if pilot:
+        main_mod.app_meta_set(db_path, "pilot_display_name", pilot[:120])
+    if win is not None:
+        cached = dict(prof)
+        if em:
+            cached["email"] = em
+        if hid:
+            cached["hardware_id"] = hid
+        try:
+            win._cached_server_profile_data = cached
+        except Exception:
+            pass
+        _platin_apply_cockpit_identity(win, main_mod, db_path)
+
+
+def _patch_ionos_canonical_hardware_binding(main_mod: Any) -> None:
+    """ionos_hardware_id bis 128 Zeichen (Web-Kanon ``uuid__emailhash``)."""
+    if getattr(main_mod, "_platin_canonical_hwid_patch", False):
+        return
+    ionos_key = getattr(main_mod, "IONOS_HW_ID_KEY", "ionos_hardware_id")
+    orig_bind = main_mod.ionos_bind_hardware_id
+    orig_p2p = main_mod.p2p_hardware_id
+
+    def ionos_bind_hardware_id_platin(path: Any, hardware_id: Any) -> None:
+        hid = str(hardware_id or "").strip()[:128]
+        if not hid or hid.lower() == "unknown":
+            return
+        try:
+            main_mod.app_meta_set(path, ionos_key, hid)
+            tag = (main_mod.app_meta_get(path, "econ_device_tag", "") or "").strip()
+            if not tag or tag.lower() == "unknown":
+                main_mod.app_meta_set(path, "econ_device_tag", hid[:64])
+        except OSError:
+            pass
+
+    def p2p_hardware_id_platin(path: Any) -> str:
+        bound = (main_mod.app_meta_get(path, ionos_key, "") or "").strip()
+        if bound and bound.lower() != "unknown":
+            return bound[:128]
+        return str(orig_p2p(path) or "")[:128]
+
+    main_mod.ionos_bind_hardware_id = ionos_bind_hardware_id_platin
+    main_mod.p2p_hardware_id = p2p_hardware_id_platin
+    main_mod._platin_canonical_hwid_patch = True
+
+
+def _patch_build_ionos_cloud_sync_body(main_mod: Any) -> None:
+    """Cloud-Sync-Body: Portal-E-Mail + kanonische HWID wie Web-Login."""
+    if getattr(main_mod, "_platin_cloud_body_patch", False):
+        return
+    orig = main_mod.build_ionos_cloud_sync_body
+
+    def build_ionos_cloud_sync_body_platin(
+        path: Any, *, pull_only: bool = False
+    ) -> dict[str, object]:
+        body = dict(orig(path, pull_only=pull_only))
+        _platin_inject_profile_cloud_credentials(main_mod, path, None)
+        em = (main_mod.app_meta_get(path, "portal_email", "") or "").strip().lower()
+        pw = (main_mod.cloud_password_get(path) or "").strip()
+        win = _platin_find_active_main_window(main_mod)
+        tok = _platin_ram_jwt_from_win(win)
+        if tok and not pw:
+            body["access_token"] = tok[:4096]
+            body["session_token"] = tok[:4096]
+        pilot = (
+            main_mod.app_meta_get(path, "pilot_display_name", "")
+            or main_mod.app_meta_get(path, "pilot_name", "")
+            or ""
+        ).strip()
+        extra = _sterile_login_json(
+            main_mod,
+            path,
+            pilot or em.split("@", 1)[0] if em else "",
+            pw,
+            portal_email=em,
+        )
+        for key in (
+            "portal_email",
+            "email",
+            "pc_hardware_id",
+            "hardware_id",
+            "incoming_pc_hardware_id",
+        ):
+            if extra.get(key):
+                body[key] = extra[key]
+        return body
+
+    main_mod.build_ionos_cloud_sync_body = build_ionos_cloud_sync_body_platin
+    main_mod._platin_cloud_body_patch = True
+
+
+def _patch_platin_kundenprofil_cloud_bypass(main_mod: Any) -> None:
+    """JWT-Session: Cloud-Passwort-Warnung umgehen + Credentials vor Profil-Dialog injizieren."""
+    win_cls = getattr(main_mod, "MainWindow", None)
+    if win_cls is None or getattr(win_cls, "_platin_profile_cloud_bypass", False):
+        return
+    orig_ready = win_cls._ionos_cloud_ready
+    orig_open = win_cls._open_customer_profile_dialog
+    orig_refresh = getattr(win_cls, "_refresh_profile_tab", None)
+
+    def _ionos_cloud_ready_platin(self: Any) -> bool:
+        db = getattr(main_mod, "DB_PATH", None)
+        if db is None:
+            return bool(orig_ready(self))
+        _platin_inject_profile_cloud_credentials(main_mod, db, self)
+        if _platin_has_valid_ionos_jwt(main_mod, db):
+            return True
+        return bool(orig_ready(self))
+
+    def _open_customer_profile_dialog_platin(self: Any) -> None:
+        db = getattr(main_mod, "DB_PATH", None)
+        if db is not None:
+            _platin_inject_profile_cloud_credentials(main_mod, db, self)
+        return orig_open(self)
+
+    def _refresh_profile_tab_platin(self: Any) -> None:
+        db = getattr(main_mod, "DB_PATH", None)
+        if db is not None:
+            _platin_inject_profile_cloud_credentials(main_mod, db, self)
+        if callable(orig_refresh):
+            return orig_refresh(self)
+        return None
+
+    win_cls._ionos_cloud_ready = _ionos_cloud_ready_platin
+    win_cls._open_customer_profile_dialog = _open_customer_profile_dialog_platin
+    if callable(orig_refresh):
+        win_cls._refresh_profile_tab = _refresh_profile_tab_platin
+    win_cls._platin_profile_cloud_bypass = True
+
+
+def _patch_platin_email_only_cloud_ready(main_mod: Any) -> None:
+    """_ionos_cloud_ready: True bei gültigem JWT (Kundenprofil ohne Warn-Popup)."""
+    win_cls = getattr(main_mod, "MainWindow", None)
+    if win_cls is None or getattr(win_cls, "_platin_email_cloud_ready_patch", False):
+        return
+    if not getattr(win_cls, "_platin_profile_cloud_bypass", False):
+        _patch_platin_kundenprofil_cloud_bypass(main_mod)
+    orig_ready = win_cls._ionos_cloud_ready
+
+    def _ionos_cloud_ready_email_jwt(self: Any) -> bool:
+        db = getattr(main_mod, "DB_PATH", None)
+        if db is not None:
+            _platin_inject_profile_cloud_credentials(main_mod, db, self)
+            if _platin_has_valid_ionos_jwt(main_mod, db):
+                return True
+        return bool(orig_ready(self))
+
+    win_cls._ionos_cloud_ready = _ionos_cloud_ready_email_jwt
+    win_cls._platin_email_cloud_ready_patch = True
+
+
+def _patch_customer_profile_identity(main_mod: Any) -> None:
+    win_cls = getattr(main_mod, "MainWindow", None)
+    if win_cls is not None and not getattr(win_cls, "_platin_kundenkonto_patch", False):
+        orig_fb = win_cls._local_profile_fallback_data
+
+        def _local_profile_fallback_data_platin(self: Any) -> dict[str, Any]:
+            data = orig_fb(self)
+            if not isinstance(data, dict):
+                data = {}
+            em = (
+                main_mod.app_meta_get(main_mod.DB_PATH, "portal_email", "") or ""
+            ).strip().lower()
+            if em and "@" in em:
+                data["email"] = em
+            hid = (
+                main_mod.app_meta_get(main_mod.DB_PATH, "ionos_hardware_id", "") or ""
+            ).strip()
+            if hid:
+                data["hardware_id"] = hid[:128]
+            pn = str(data.get("pilot_name") or "").strip()
+            if (not pn or pn.lower() in ("pilot", "flugkapitän")) and em and "@" in em:
+                data["pilot_name"] = em.split("@", 1)[0]
+            return data
+
+        win_cls._local_profile_fallback_data = _local_profile_fallback_data_platin
+        win_cls._platin_kundenkonto_patch = True
+
+    dlg_cls = getattr(main_mod, "PremiumKundenkontoDialog", None)
+    if dlg_cls is None or getattr(dlg_cls, "_platin_konto_ui_patch", False):
+        return
+    orig_build = dlg_cls._build_ui
+
+    def _build_ui_platin(self: Any) -> None:
+        orig_build(self)
+        em = str(self._data.get("email") or "").strip().lower()
+        if (not em or "@" not in em) and self._mw is not None:
+            em = (
+                main_mod.app_meta_get(main_mod.DB_PATH, "portal_email", "") or ""
+            ).strip().lower()
+            if em:
+                self._data["email"] = em
+        pilot = str(self._data.get("pilot_name") or "").strip()
+        if (not pilot or pilot.lower() in ("pilot", "flugkapitän")) and em and "@" in em:
+            pilot = em.split("@", 1)[0]
+            self._data["pilot_name"] = pilot
+        hid = str(self._data.get("hardware_id") or "").strip()
+        if not hid:
+            hid = (
+                main_mod.app_meta_get(main_mod.DB_PATH, "ionos_hardware_id", "") or ""
+            ).strip()
+            if hid:
+                self._data["hardware_id"] = hid[:128]
+        lay = self.layout()
+        if lay is not None and em and "@" in em:
+            head = lay.itemAt(0)
+            if head is not None and head.widget() is not None:
+                w = head.widget()
+                if isinstance(w, QLabel):
+                    w.setText(f"{pilot or em.split('@', 1)[0]}")
+            sub = QLabel(
+                self._tr(
+                    "profile.premium_email_line",
+                    "E-Mail: {em} · HWID: {hid}",
+                ).format(em=em, hid=(hid[:48] + "…") if len(hid) > 48 else hid or "—")
+            )
+            sub.setStyleSheet("color:#64b5f6;font-size:13px;font-weight:600;")
+            sub.setWordWrap(True)
+            lay.insertWidget(1, sub)
+
+    dlg_cls._build_ui = _build_ui_platin
+    dlg_cls._platin_konto_ui_patch = True
 
 
 def _platin_apply_cockpit_identity(win: Any, main_mod: Any, db_path: Any) -> None:
@@ -1150,6 +2269,7 @@ def _purge_session_ram_cache(win: Any, main_mod: Any, db_path: Any) -> None:
         except RuntimeError:
             pass
     ram_attrs = (
+        "session_jwt_token",
         "session_token",
         "access_token",
         "ionos_jwt",
@@ -1175,16 +2295,94 @@ def _purge_session_ram_cache(win: Any, main_mod: Any, db_path: Any) -> None:
             pass
 
 
-def _store_login_access_token(main_mod: Any, db_path: Any, payload: dict[str, Any]) -> None:
-    tok = str(payload.get("access_token") or "").strip()
-    if tok:
-        main_mod.app_meta_set(db_path, "ionos_jwt", tok[:4096])
+def _platin_pull_user_profile_sync(
+    main_mod: Any, db_path: Any, win: Any | None = None
+) -> None:
+    """Nach Login: GET /api/v1/user/profile (Bearer) → DB + Cockpit-Credits wie Web."""
+    if win is None:
+        win = _platin_find_active_main_window(main_mod)
+    tok = _platin_resolve_jwt_token(main_mod, db_path, win)
+    if not tok:
+        return
+    base = main_mod.ionos_api_base_url().strip().rstrip("/")
+    if not base:
+        return
+    try:
+        r = requests.get(
+            f"{base}/api/v1/user/profile",
+            headers=_platin_bearer_headers(main_mod, db_path, win),
+            timeout=18,
+            verify=main_mod.auth_requests_verify_tls(),
+        )
+        if r.status_code >= 400:
+            return
+        j = r.json() if r.content else {}
+        if not isinstance(j, dict):
+            return
+        prof = j.get("profile") if isinstance(j.get("profile"), dict) else j
+        if not j.get("ok") and not isinstance(prof, dict):
+            return
+        cred = float(prof.get("credits", j.get("credits", 0)) or 0)
+        xp_v = float(prof.get("xp", j.get("xp", 0)) or 0)
+        cdb = main_mod._conn(db_path)
+        try:
+            cdb.execute(
+                "UPDATE pilot_stats SET credits = ?, xp = ? WHERE id = 1;",
+                (cred, xp_v),
+            )
+            cdb.commit()
+        finally:
+            cdb.close()
+        print(
+            f"[SkyTycoon] Profil-Sync v45: {cred:.0f} CR · {xp_v:.0f} XP",
+            flush=True,
+        )
+
+        def _refresh_cockpit_from_profile() -> None:
+            if win is None:
+                return
+            payload = dict(j)
+            if isinstance(prof, dict):
+                payload.setdefault("profile", prof)
+            _platin_apply_profile_identity(main_mod, db_path, win, payload)
+            if hasattr(win, "_refresh_credits_label"):
+                try:
+                    win._refresh_credits_label()
+                except Exception:
+                    pass
+            if hasattr(win, "_force_thread_safe_dashboard_refresh"):
+                try:
+                    win._force_thread_safe_dashboard_refresh()
+                except Exception:
+                    pass
+
+        if win is not None:
+            _platin_invoke_on_main_thread(win, _refresh_cockpit_from_profile)
+        else:
+            _refresh_cockpit_from_profile()
+    except Exception as exc_prof:
+        print(f"[SkyTycoon] Profil-Sync: {exc_prof!s}", flush=True)
+
+
+def _store_login_access_token(
+    main_mod: Any,
+    db_path: Any,
+    payload: dict[str, Any],
+    *,
+    win: Any | None = None,
+) -> None:
+    _platin_anchor_jwt_ram(main_mod, db_path, payload, win=win)
 
 
 def _normalize_client_hwid(
     main_mod: Any, db_path: Any, *, force_os: bool = False
 ) -> str:
-    """Saubere HWID (64 Zeichen). force_os=True: echte Windows-UUID vor Login erzwingen."""
+    """HWID für API: vor Login Windows-UUID; danach kanonische Server-ID (wie Web)."""
+    if not force_os:
+        bound = (main_mod.app_meta_get(db_path, "ionos_hardware_id", "") or "").strip()
+        em = (main_mod.app_meta_get(db_path, "portal_email", "") or "").strip().lower()
+        if bound and bound != "unknown" and (("__" in bound) or not em or "@" not in em):
+            return bound[:128]
     if force_os:
         for key in ("ionos_hardware_id", "econ_device_tag"):
             try:
@@ -1208,14 +2406,234 @@ def _normalize_client_hwid(
         hid = str(raw or "").strip()
     if len(hid) >= 2 and hid[0] == hid[-1] and hid[0] in "\"'":
         hid = hid[1:-1].strip()
-    return hid[:64] if hid and hid.lower() != "unknown" else hid[:64]
+    return hid[:128] if hid and hid.lower() != "unknown" else hid[:128]
+
+
+def _platin_simconnect_exception_silent(exc: BaseException) -> bool:
+    txt = f"{type(exc).__name__}: {exc}".upper()
+    return "SIMCONNECT" in txt or "SIM CONNECT" in txt
+
+
+def _platin_post_cloud_error_async(
+    injector: Any, message: str, source: str = "desktop"
+) -> None:
+    if not message or injector is None:
+        return
+    win = getattr(injector, "win", None)
+    if win is None:
+        return
+    last = float(getattr(win, "_platin_err_log_mono", 0.0) or 0.0)
+    now = time.monotonic()
+    if now - last < 8.0:
+        return
+    win._platin_err_log_mono = now
+    injector._pool().start(_CloudErrorLogRunnable(injector, message[:3500], source))
+
+
+def _platin_forward_simconnect_cloud(win: Any, phase_key: str) -> None:
+    inj = getattr(win, "_platin_injector", None)
+    if inj is None or not inj._online():
+        return
+    last = float(getattr(win, "_platin_sc_cloud_mono", 0.0) or 0.0)
+    now = time.monotonic()
+    if now - last < (SIMCONNECT_TELEMETRY_MS / 1000.0) - 0.05:
+        return
+    win._platin_sc_cloud_mono = now
+    lat, lon = _simconnect_latitude_longitude(win)
+    payload = {
+        "phase": phase_key,
+        "lat": _json_coord_number(lat),
+        "lon": _json_coord_number(lon),
+        "title": str(getattr(win, "_last_title", "") or "")[:120],
+        "hardware_id": _normalize_client_hwid(inj.m, inj.db_path),
+    }
+    inj._pool().start(_SimConnectCloudRunnable(inj, payload))
+
+
+def _platin_ensure_html_browser(
+    win: Any, table_attr: str, host_attr: str, view_key: str
+) -> _PlatinCloudHtmlPanel | None:
+    host = getattr(win, host_attr, None)
+    if isinstance(host, _PlatinCloudHtmlPanel):
+        return host
+    tbl = getattr(win, table_attr, None)
+    if tbl is None:
+        return None
+    parent = tbl.parentWidget()
+    if parent is None:
+        return None
+    lay = parent.layout()
+    if lay is None:
+        return None
+    inj = getattr(win, "_platin_injector", None)
+    if inj is None:
+        return None
+    _platin_sterile_wipe_layout(parent)
+    host = _PlatinCloudHtmlPanel(inj, view_key, parent)
+    idx = -1
+    for i in range(lay.count()):
+        item = lay.itemAt(i)
+        if item is not None and item.widget() is tbl:
+            idx = i
+            break
+    if idx >= 0:
+        lay.insertWidget(idx, host, 1)
+    else:
+        lay.addWidget(host, 1)
+    try:
+        tbl.hide()
+    except RuntimeError:
+        pass
+    setattr(win, host_attr, host)
+    return host
+
+
+def _patch_platin_cloud_html_views(main_mod: Any) -> None:
+    win_cls = getattr(main_mod, "MainWindow", None)
+    if win_cls is None or getattr(win_cls, "_platin_html_cloud_patch", False):
+        return
+    orig_jobs = win_cls._refresh_job_table
+    orig_prof = win_cls._refresh_profile_tab
+    orig_csv = win_cls._on_export_csv
+
+    def _refresh_job_table_cloud(self: Any) -> None:
+        if hasattr(self, "job_board_tabs") and self.job_board_tabs.currentIndex() == 3:
+            return
+        host = _platin_ensure_html_browser(
+            self, "table_jobs", "_platin_jobs_html", "jobs"
+        )
+        if host is not None:
+            qs = ""
+            if getattr(self, "_platin_short_haul_main_active", False):
+                qs = "&haul=short"
+            elif getattr(self, "_platin_long_haul_main_active", False):
+                qs = "&haul=long"
+            host.set_haul_query(qs)
+            host.load_page(getattr(host, "_page", 1))
+            return
+        orig_jobs(self)
+
+    def _refresh_profile_cloud(self: Any) -> None:
+        orig_prof(self)
+        host = _platin_ensure_html_browser(
+            self, "table_highscores", "_platin_logbook_html", "logbook"
+        )
+        if host is not None:
+            try:
+                self.table_highscores.hide()
+            except RuntimeError:
+                pass
+            host.load_page(1)
+        inj = getattr(self, "_platin_injector", None)
+        if inj is not None:
+            inj._fetch_profit_svg_async()
+
+    def _on_export_csv_cloud(self: Any) -> None:
+        inj = getattr(self, "_platin_injector", None)
+        if inj is None or not inj._online():
+            orig_csv(self)
+            return
+        base = inj._api_base()
+        lang = inj._ui_lang_code()
+        dest, _ = QFileDialog.getSaveFileName(
+            self,
+            inj._tr("export.csv", "Logbuch exportieren"),
+            str(inj.m.desktop_dir() / "skytycoon_logbook.csv"),
+            "CSV (*.csv)",
+        )
+        if not dest:
+            return
+        headers = dict(inj._headers())
+        headers["Accept-Encoding"] = "gzip, deflate"
+
+        def _work() -> None:
+            try:
+                r = requests.get(
+                    f"{base}/api/v1/admin/logbook/export?lang={lang}",
+                    headers=headers,
+                    timeout=60,
+                    verify=inj.m.auth_requests_verify_tls(),
+                )
+                if r.status_code >= 400:
+                    raise RuntimeError(f"HTTP {r.status_code}")
+                Path(dest).write_bytes(r.content)
+                ok_msg = inj._tr("export.ok", "Export abgeschlossen.")
+            except Exception as exc_csv:
+                ok_msg = str(exc_csv)
+
+            def _ui() -> None:
+                if "HTTP" in ok_msg or "Error" in ok_msg:
+                    QMessageBox.warning(self, inj._tr("export.title", "Export"), ok_msg)
+                else:
+                    QMessageBox.information(
+                        self, inj._tr("export.title", "Export"), f"{ok_msg}\n{dest}"
+                    )
+
+            _platin_invoke_on_main_thread(self, _ui)
+
+        inj._pool().start(_FnRunnable(_work))
+
+    win_cls._refresh_job_table = _refresh_job_table_cloud
+    win_cls._refresh_profile_tab = _refresh_profile_cloud
+    win_cls._on_export_csv = _on_export_csv_cloud
+    win_cls._platin_html_cloud_patch = True
+
+
+def _patch_platin_cloud_error_excepthook(main_mod: Any) -> None:
+    if getattr(main_mod, "_platin_cloud_exhook", False):
+        return
+    import sys
+
+    _orig = sys.excepthook
+
+    def _hook(typ: type, val: BaseException, tb: Any) -> None:
+        try:
+            inj = None
+            for mod in (main_mod, sys.modules.get("__main__")):
+                if mod is None:
+                    continue
+                win_cls = getattr(mod, "MainWindow", None)
+                if win_cls is None:
+                    continue
+            app = QApplication.instance()
+            if app is not None:
+                for w in app.topLevelWidgets():
+                    inj = getattr(w, "_platin_injector", None)
+                    if inj is not None:
+                        break
+            if inj is not None and val is not None:
+                _platin_post_cloud_error_async(
+                    inj, f"{typ.__name__}: {val}"[:3500], "excepthook"
+                )
+        except Exception:
+            pass
+        _orig(typ, val, tb)
+
+    sys.excepthook = _hook
+    main_mod._platin_cloud_exhook = True
+
+
+def _canonical_hwid_from_login(
+    main_mod: Any, db_path: Any, login_json: dict[str, Any] | None, fallback: str
+) -> str:
+    """Server-HWID 1:1 — Web-ID / pc_hardware_id aus Login-Antwort (kein Client-Suffix)."""
+    j = login_json if isinstance(login_json, dict) else {}
+    hid = str(
+        j.get("web_id")
+        or j.get("pc_hardware_id")
+        or j.get("incoming_pc_hardware_id")
+        or j.get("hardware_id")
+        or fallback
+        or ""
+    ).strip()[:128]
+    return hid
 
 
 def _bind_server_hardware_id(
     main_mod: Any, db_path: Any, login_json: dict[str, Any] | None, fallback: str
 ) -> None:
     """Nach Login/Activate: Server-HWID (kanonisch) lokal speichern."""
-    hid = str((login_json or {}).get("hardware_id") or fallback or "").strip()[:64]
+    hid = _canonical_hwid_from_login(main_mod, db_path, login_json, fallback)
     if hid and hid.lower() != "unknown":
         main_mod.ionos_bind_hardware_id(db_path, hid)
 
@@ -1232,7 +2650,7 @@ def _sterile_api_string(val: Any, *, max_len: int = 200) -> str:
 
 
 def _app_data_dir(main_mod: Any, db_path: Any) -> Path:
-    """Projektordner dynamisch — portabel für Co-Dev (BigMaq / Schweiz / DE)."""
+    """Projektordner dynamisch — portabel für Co-Dev (CH / DE)."""
     _ = db_path
     return platin_project_root()
 
@@ -1269,6 +2687,113 @@ def _session_decrypt(main_mod: Any, db_path: Any, blob: str) -> str:
     k = _session_crypto_key(main_mod, db_path)
     p = bytes(b ^ k[i % len(k)] for i, b in enumerate(raw))
     return p.decode("utf-8", errors="replace")
+
+
+def _iter_local_session_candidate_paths(
+    main_mod: Any | None, db_path: Any
+) -> list[Path]:
+    """Alle bekannten Speicherorte für Remember-Me / Geister-Sessions."""
+    roots: list[Path] = []
+    seen_roots: set[str] = set()
+
+    def _add_root(candidate: Path) -> None:
+        raw = str(candidate).strip()
+        if not raw:
+            return
+        try:
+            key = str(candidate.resolve())
+        except OSError:
+            key = raw
+        if key in seen_roots:
+            return
+        seen_roots.add(key)
+        roots.append(candidate)
+
+    if main_mod is not None:
+        try:
+            _add_root(_app_data_dir(main_mod, db_path))
+        except Exception:
+            pass
+    _add_root(platin_project_root())
+    for extra in (
+        Path("A:/"),
+        Path("A:/SkyTycoon"),
+        Path.home() / "SkyTycoon",
+        Path(os.environ.get("APPDATA", "")) / "SkyTycoon",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "SkyTycoon",
+    ):
+        _add_root(extra)
+    env_data = (os.environ.get("SKYTYCOON_DATA_DIR") or "").strip()
+    if env_data:
+        _add_root(Path(env_data))
+    if db_path is not None:
+        try:
+            dp = Path(db_path)
+            _add_root(dp.parent)
+            _add_root(dp.parent.parent)
+        except (TypeError, OSError):
+            pass
+    paths: list[Path] = []
+    seen_files: set[str] = set()
+    for root in roots:
+        for name in (
+            LOCAL_SESSION_FILENAME,
+            ".local_session.json",
+            "local_session.json.bak",
+        ):
+            p = root / name
+            key = str(p)
+            if key in seen_files:
+                continue
+            seen_files.add(key)
+            paths.append(p)
+    return paths
+
+
+def _kaltstart_nuke_login_tresor(
+    main_mod: Any | None = None,
+    db_path: Any = None,
+    *,
+    announce: bool = False,
+) -> None:
+    """
+    Kaltstart-Riegel: local_session.json überschreiben + löschen, bevor irgend
+    eine Session geladen oder aus dem Disk-Cache hydriert wird.
+    """
+    global _PLATIN_TRESOR_BAM_PRINTED
+    empty = "{}\n"
+    for p in _iter_local_session_candidate_paths(main_mod, db_path):
+        try:
+            if p.parent and not p.parent.is_dir():
+                p.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        try:
+            p.write_text(empty, encoding="utf-8")
+        except OSError:
+            pass
+        try:
+            if p.is_file():
+                os.remove(str(p))
+        except OSError:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+    if main_mod is not None and db_path is not None:
+        _clear_stale_login_identity(main_mod, db_path)
+        for meta_key in ("platin_remember_login",):
+            try:
+                main_mod.app_meta_set(db_path, meta_key, "0")
+            except Exception:
+                pass
+    if announce and not _PLATIN_TRESOR_BAM_PRINTED:
+        _PLATIN_TRESOR_BAM_PRINTED = True
+        print(
+            "[SkyTycoon] BÄM — DER LOGIN-TRESOR IST 100% GEREINIGT! "
+            f"({PLATIN_BUILD})",
+            flush=True,
+        )
 
 
 def _clear_local_session_file(main_mod: Any, db_path: Any) -> None:
@@ -1332,62 +2857,21 @@ def _save_local_session(
     main_mod: Any,
     db_path: Any,
     *,
-    username: str,
-    password: str,
-    access_token: str,
-    portal_email: str,
+    username: str = "",
+    password: str = "",
+    access_token: str = "",
+    portal_email: str = "",
     license_key: str = "",
 ) -> None:
-    lk = _sterile_api_string(license_key, max_len=256)
-    payload = {
-        "v": LOCAL_SESSION_VERSION,
-        "remember": True,
-        "username": _sterile_api_string(username, max_len=120),
-        "portal_email": _sterile_api_string(portal_email, max_len=200).lower(),
-        "password_enc": _session_encrypt(main_mod, db_path, password),
-        "access_token_enc": _session_encrypt(main_mod, db_path, access_token),
-        "license_key_enc": _session_encrypt(main_mod, db_path, lk) if lk else "",
-        "saved_ts": int(time.time()),
-    }
-    p = _local_session_path(main_mod, db_path)
-    try:
-        p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    except OSError:
-        pass
+    """v46: Keine lokale Session/JWT-Persistenz — Dummy {} + Löschen."""
+    _ = username, password, access_token, portal_email, license_key
+    _kaltstart_nuke_login_tresor(main_mod, db_path)
 
 
 def _load_local_session(main_mod: Any, db_path: Any) -> dict[str, Any] | None:
-    p = _local_session_path(main_mod, db_path)
-    if not p.is_file():
-        return None
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        _clear_local_session_file(main_mod, db_path)
-        return None
-    if not isinstance(data, dict) or not data.get("remember"):
-        return None
-    ver = int(data.get("v") or 0)
-    if ver not in (2, LOCAL_SESSION_VERSION):
-        _clear_local_session_file(main_mod, db_path)
-        return None
-    saved_ts = int(data.get("saved_ts") or 0)
-    if saved_ts and time.time() - saved_ts > LOCAL_SESSION_MAX_AGE_SEC:
-        _clear_local_session_file(main_mod, db_path)
-        return None
-    pw = _session_decrypt(main_mod, db_path, str(data.get("password_enc") or ""))
-    tok = _session_decrypt(main_mod, db_path, str(data.get("access_token_enc") or ""))
-    if not pw and not tok:
-        _clear_local_session_file(main_mod, db_path)
-        return None
-    lk = _session_decrypt(main_mod, db_path, str(data.get("license_key_enc") or ""))
-    return {
-        "username": str(data.get("username") or ""),
-        "portal_email": str(data.get("portal_email") or ""),
-        "password": pw,
-        "access_token": tok,
-        "license_key": lk,
-    }
+    """v46: Disk-Session verboten — niemals JWT/Passwort von Festplatte hydrieren."""
+    _kaltstart_nuke_login_tresor(main_mod, db_path)
+    return None
 
 
 def _platin_persist_remember_me(
@@ -1395,16 +2879,7 @@ def _platin_persist_remember_me(
 ) -> None:
     cb = getattr(dlg, "_platin_remember_cb", None)
     remember = True if cb is None else bool(cb.isChecked())
-    pilot = (
-        getattr(dlg, "ed_login_name", None).text().strip()
-        if getattr(dlg, "ed_login_name", None) is not None
-        else ""
-    )
-    pw = (
-        getattr(dlg, "ed_login_pw", None).text().strip()
-        if getattr(dlg, "ed_login_pw", None) is not None
-        else ""
-    )
+    pilot, em_save, pw, _lk0 = _startup_auth_credentials(dlg)
     j = login_json if isinstance(login_json, dict) else {}
     lk = ""
     if getattr(dlg, "ed_login_key", None) is not None:
@@ -1416,28 +2891,11 @@ def _platin_persist_remember_me(
             lk = (main_mod.app_meta_get(db_path, "license_key_installed", "") or "").strip()
         except Exception:
             lk = ""
-    if remember and pilot and pw:
-        em = _resolve_portal_email_from_login(pilot, j)
-        tok = str(
-            j.get("access_token") or j.get("token") or ""
-        ).strip()
-        if not tok:
-            try:
-                tok = (main_mod.app_meta_get(db_path, "ionos_jwt", "") or "").strip()
-            except Exception:
-                tok = ""
-        _save_local_session(
-            main_mod,
-            db_path,
-            username=pilot,
-            password=pw,
-            access_token=tok,
-            portal_email=em if "@" in em else "",
-            license_key=lk,
-        )
+    if remember and pw and em_save and "@" in em_save:
         if lk:
             main_mod.app_meta_set(db_path, "license_key_installed", lk[:256])
         main_mod.app_meta_set(db_path, "platin_remember_login", "1")
+        _kaltstart_nuke_login_tresor(main_mod, db_path)
     elif cb is not None and not remember:
         _clear_local_session_file(main_mod, db_path)
         main_mod.app_meta_set(db_path, "platin_remember_login", "0")
@@ -1460,33 +2918,23 @@ def _platin_login_accept(
         or main_mod.app_meta_get(db_path, "license_activated", "0") == "1"
     ):
         main_mod.app_meta_set(db_path, "license_activated", "1")
+    pilot_f, em_f, pw_f, _lk_f = _startup_auth_credentials(dlg)
     _platin_seal_login_session(
         main_mod,
         db_path,
         payload,
-        pilot=(
-            getattr(dlg, "ed_login_name", None).text().strip()
-            if getattr(dlg, "ed_login_name", None) is not None
-            else ""
-        ),
-        password=(
-            getattr(dlg, "ed_login_pw", None).text().strip()
-            if getattr(dlg, "ed_login_pw", None) is not None
-            else ""
-        ),
+        pilot=pilot_f or em_f.split("@", 1)[0] if em_f and "@" in em_f else pilot_f,
+        password=pw_f,
+        win=parent,
+    )
+    _platin_anchor_jwt_on_parent(
+        main_mod, db_path, payload, dlg=dlg, win=parent
     )
     _platin_persist_remember_me(dlg, main_mod, db_path, payload)
-    try:
-        from platin_cloud_only import hydrate_platin_credentials_from_disk
-
-        hydrate_platin_credentials_from_disk(main_mod)
-    except Exception:
-        pass
     parent = getattr(dlg, "parent_window", None) or dlg.parent()
-    pilot_txt = ""
-    if getattr(dlg, "ed_login_name", None) is not None:
-        pilot_txt = dlg.ed_login_name.text().strip()
-    em_login = _resolve_portal_email_from_login(pilot_txt, payload)
+    pilot_txt, em_login, _, _ = _startup_auth_credentials(dlg)
+    if not em_login or "@" not in em_login:
+        em_login = _resolve_portal_email_from_login(pilot_txt, payload)
     if em_login and "@" in em_login:
         try:
             prof_login = {
@@ -1514,6 +2962,10 @@ def _platin_login_accept(
     except Exception:
         pass
     dlg._platin_pending_login_json = None
+    try:
+        main_mod._platin_user_logged_in = True
+    except Exception:
+        pass
     if parent is not None:
         parent._platin_license_trusted = True
         parent._platin_license_prompt_block_until = time.time() + 86400.0
@@ -1530,10 +2982,10 @@ def _platin_login_accept(
 def _prepare_startup_auth_remember_prefill(
     dlg: Any, main_mod: Any, db_path: Any
 ) -> bool:
-    """Gespeicherte Session laden (Datei reicht — Meta-Flag optional)."""
-    if not _local_session_path(main_mod, db_path).is_file():
-        return False
-    return _prefill_startup_auth_from_local_session(dlg, main_mod, db_path)
+    """v46: Kein Disk-Remember-Me — sterile Felder, Cloud-Login only."""
+    _platin_v46_tresor_sweep(main_mod, db_path, None)
+    _sterile_clear_startup_auth_fields(dlg)
+    return False
 
 
 def _remember_me_label(main_mod: Any, db_path: Any) -> str:
@@ -1545,6 +2997,88 @@ def _remember_me_label(main_mod: Any, db_path: Any) -> str:
     if lg == "en":
         return "🔓 Remember credentials & log in automatically"
     return "🔓 Zugangsdaten merken & automatisch anmelden"
+
+
+def _startup_auth_credentials(dlg: Any) -> tuple[str, str, str, str]:
+    """Pilot, E-Mail, Passwort, Lizenz — getrennte Felder (wie skytycoon.info)."""
+    pilot = ""
+    email = ""
+    pw = ""
+    key = ""
+    if getattr(dlg, "ed_login_name", None) is not None:
+        pilot = dlg.ed_login_name.text().strip()
+    if getattr(dlg, "ed_login_email", None) is not None:
+        email = dlg.ed_login_email.text().strip().lower()
+    elif "@" in pilot:
+        email = pilot.lower()
+        pilot = pilot.split("@", 1)[0].strip() or pilot
+    if getattr(dlg, "ed_login_pw", None) is not None:
+        pw = dlg.ed_login_pw.text().strip()
+    if getattr(dlg, "ed_login_key", None) is not None:
+        key = dlg.ed_login_key.text().strip()
+    if not pilot and email and "@" in email:
+        pilot = email.split("@", 1)[0][:120]
+    return pilot[:120], email[:200], pw, key[:256]
+
+
+def _inject_startup_auth_four_field_form(
+    dlg: Any, main_mod: Any, db_path: Any
+) -> None:
+    """Vier Felder: Pilot, E-Mail, Passwort, Lizenzschlüssel."""
+    if getattr(dlg, "_platin_four_field_form", False):
+        return
+    if getattr(dlg, "ed_login_name", None) is None or getattr(dlg, "ed_login_pw", None) is None:
+        return
+    lay = dlg.ed_login_name.parentWidget().layout()
+    if lay is None:
+        return
+    dlg._platin_four_field_form = True
+    dlg.ed_login_email = QLineEdit()
+    dlg.ed_login_email.setClearButtonEnabled(True)
+    idx_pw = lay.indexOf(dlg.ed_login_pw)
+    if idx_pw < 0:
+        idx_pw = lay.count()
+    lbl_pilot = QLabel(
+        main_mod.i18n_db(db_path, "startup.auth.lbl_pilot", "👤 Pilot / Anzeigename")
+    )
+    lbl_em = QLabel(
+        main_mod.i18n_db(
+            db_path, "startup.auth.lbl_email", "✉️ E-Mail (skytycoon.info)"
+        )
+    )
+    lbl_pilot.setStyleSheet("color:#8ac7ff;font-weight:700;font-size:12px;")
+    lbl_em.setStyleSheet("color:#8ac7ff;font-weight:700;font-size:12px;margin-top:4px;")
+    idx_name = lay.indexOf(dlg.ed_login_name)
+    if idx_name >= 0:
+        lay.insertWidget(idx_name, lbl_pilot)
+        idx_pw = lay.indexOf(dlg.ed_login_pw)
+    lay.insertWidget(idx_pw, lbl_em)
+    lay.insertWidget(idx_pw + 1, dlg.ed_login_email)
+    try:
+        dlg.ed_login_name.show()
+        lbl_pilot.show()
+        dlg.ed_login_name.setClearButtonEnabled(True)
+    except RuntimeError:
+        pass
+    dlg._platin_email_only_login = False
+    dlg.ed_login_name.setPlaceholderText(
+        main_mod.i18n_db(
+            db_path,
+            "startup.auth.placeholder_pilot",
+            "👤 Pilot / Anzeigename (optional)",
+        )
+    )
+    dlg.ed_login_email.setPlaceholderText(
+        main_mod.i18n_db(
+            db_path,
+            "startup.auth.placeholder_email",
+            "ihre@email.de (gleich wie Website-Login)",
+        )
+    )
+    try:
+        dlg.resize(max(int(dlg.width()), 540), int(dlg.height()) + 72)
+    except (TypeError, ValueError):
+        pass
 
 
 _PLATIN_AUTH_ICE_STYLE = """
@@ -1624,8 +3158,16 @@ def _patch_startup_auth_iceblue_ui(main_mod: Any) -> None:
             self.ed_login_name.setPlaceholderText(
                 main_mod.i18n_db(
                     self._path,
+                    "startup.auth.placeholder_pilot",
+                    "👤 Pilot / Anzeigename",
+                )
+            )
+        if getattr(self, "ed_login_email", None) is not None:
+            self.ed_login_email.setPlaceholderText(
+                main_mod.i18n_db(
+                    self._path,
                     "startup.auth.placeholder_email",
-                    "✉️ E-Mail-Adresse / Portal-E-Mail",
+                    "✉️ E-Mail (skytycoon.info)",
                 )
             )
         if getattr(self, "ed_login_pw", None) is not None:
@@ -1680,6 +3222,7 @@ def _inject_startup_auth_remember_checkbox(main_mod: Any) -> None:
 
     def __init__(self: Any, db_path: Any, parent: Any = None) -> None:
         orig_init(self, db_path, parent)
+        _inject_startup_auth_four_field_form(self, main_mod, db_path)
         if getattr(self, "ed_login_key", None) is not None:
             self.ed_login_key.setVisible(True)
             if getattr(self, "b_login_paste", None) is not None:
@@ -1705,11 +3248,7 @@ def _inject_startup_auth_remember_checkbox(main_mod: Any) -> None:
             "QCheckBox::indicator:checked{background:#2c2c32;border-color:#e8e8ec;}"
         )
         self._platin_remember_cb = cb
-        cb.setChecked(True)
-        if _local_session_path(main_mod, db_path).is_file():
-            cb.setChecked(True)
-        elif main_mod.app_meta_get(db_path, "platin_remember_login", "0") == "0":
-            cb.setChecked(False)
+        cb.setChecked(False)
         lay = self.ed_login_pw.parentWidget().layout() if self.ed_login_pw else None
         inserted = False
         if lay is not None:
@@ -1743,10 +3282,18 @@ def _prefill_startup_auth_from_local_session(dlg: Any, main_mod: Any, db_path: A
     sess = _load_local_session(main_mod, db_path)
     if not sess:
         return False
-    user = str(sess.get("portal_email") or sess.get("username") or "").strip()
+    em = str(sess.get("portal_email") or "").strip().lower()
+    user = str(sess.get("username") or "").strip()
     pw = str(sess.get("password") or "").strip()
+    if "@" in user and not em:
+        em = user.lower()
+        user = user.split("@", 1)[0]
+    if em and getattr(dlg, "ed_login_email", None) is not None:
+        dlg.ed_login_email.setText(em)
     if user and getattr(dlg, "ed_login_name", None) is not None:
         dlg.ed_login_name.setText(user)
+    elif em and getattr(dlg, "ed_login_name", None) is not None:
+        dlg.ed_login_name.setText(em.split("@", 1)[0])
     if pw and getattr(dlg, "ed_login_pw", None) is not None:
         dlg.ed_login_pw.setText(pw)
     lk = str(sess.get("license_key") or "").strip()
@@ -1757,7 +3304,7 @@ def _prefill_startup_auth_from_local_session(dlg: Any, main_mod: Any, db_path: A
     cb = getattr(dlg, "_platin_remember_cb", None)
     if cb is not None:
         cb.setChecked(True)
-    return bool(user and pw)
+    return bool((em or user) and pw)
 
 
 class _PlatinAutoLoginSettingsDialog(QDialog):
@@ -1863,6 +3410,11 @@ def _prepare_startup_auth_dialog(dlg: Any, main_mod: Any) -> None:
         dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
     except Exception:
         pass
+    try:
+        dlg.setStyleSheet(_PLATIN_AUTH_ICE_STYLE)
+    except RuntimeError:
+        pass
+    _sterile_clear_startup_auth_fields(dlg)
     if hasattr(dlg, "_apply_startup_auth_i18n"):
         dlg._apply_startup_auth_i18n()
 
@@ -1885,7 +3437,12 @@ def _run_modal_startup_auth(
     dlg = dlg_cls(db_path, None)
     _prepare_startup_auth_dialog(dlg, main_mod)
     has_saved = _prepare_startup_auth_remember_prefill(dlg, main_mod, db_path)
-    if has_saved and getattr(dlg, "b_login", None) is not None:
+    if (
+        has_saved
+        and getattr(dlg, "_platin_remember_cb", None) is not None
+        and dlg._platin_remember_cb.isChecked()
+        and getattr(dlg, "b_login", None) is not None
+    ):
 
         def _auto_login() -> None:
             try:
@@ -1913,6 +3470,10 @@ def _run_modal_startup_auth(
     _PLATIN_BLOCK_STARTUP_POPUPS = False
     win._platin_auth_gate_done = True
     win._platin_coldstart_login_complete = True
+    try:
+        main_mod._platin_user_logged_in = True
+    except Exception:
+        pass
     injector._after_platin_login_success()
     injector._post_auth_bootstrap()
     return True
@@ -1927,24 +3488,27 @@ def _sterile_login_json(
     license_key: str = "",
     portal_email: str = "",
 ) -> dict[str, str]:
-    """Minimaler Login/cloud_sync-Body: username, password, pc_hardware_id (+ optional E-Mail)."""
-    hid = _normalize_client_hwid(main_mod, db_path, force_os=True)
-    pilot = _sterile_api_string(username, max_len=120)
+    """Reine E-Mail-Auth: E-Mail + Passwort + PC-HWID (Pilot nur optional)."""
+    pc_hid = _normalize_client_hwid(main_mod, db_path, force_os=True)
     pw = _sterile_api_string(password, max_len=256)
-    body: dict[str, str] = {
-        "username": pilot,
-        "pilot_name": pilot,
-        "password": pw,
-        "pc_hardware_id": hid,
-        "hardware_id": hid,
-        "incoming_pc_hardware_id": hid,
-    }
     em = _sterile_api_string(portal_email, max_len=200).lower()
+    pilot = _sterile_api_string(username, max_len=120)
     if not em and "@" in pilot:
         em = pilot.lower()
+        pilot = pilot.split("@", 1)[0].strip() or pilot
+    body: dict[str, str] = {
+        "password": pw,
+        "pc_hardware_id": pc_hid,
+        "hardware_id": pc_hid,
+        "incoming_pc_hardware_id": pc_hid,
+    }
     if em and "@" in em:
         body["email"] = em
         body["portal_email"] = em
+        body["customer_email"] = em
+    if pilot and "@" not in pilot:
+        body["pilot_name"] = pilot
+        body["username"] = pilot
     lk = _sterile_api_string(license_key, max_len=256)
     if lk:
         body["license_key"] = lk
@@ -1961,16 +3525,23 @@ def _sterile_login_json(
 
 
 def _desktop_auth_login_body(
-    main_mod: Any, db_path: Any, pilot: str, pw: str, key: str = ""
+    main_mod: Any,
+    db_path: Any,
+    pilot: str,
+    pw: str,
+    key: str = "",
+    *,
+    portal_email: str = "",
 ) -> dict[str, Any]:
+    em = (portal_email or "").strip().lower()
     return dict(
         _sterile_login_json(
             main_mod,
             db_path,
-            pilot,
+            "",
             pw,
             license_key=key,
-            portal_email=pilot if "@" in str(pilot or "") else "",
+            portal_email=em,
         )
     )
 
@@ -2163,7 +3734,7 @@ class _PlatinLoginOverlay(QWidget):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title)
         sub = QLabel(
-            "Konto abgemeldet. Bitte erneut anmelden (Patrick.S / Portal-Konto)."
+            "Konto abgemeldet. Bitte erneut mit Ihrem Portal-Konto anmelden."
         )
         sub.setWordWrap(True)
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2262,26 +3833,27 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
 
     def _do_login_portal_aware(self: Any) -> None:
         base = main_module.ionos_server_url()
-        pilot = self.ed_login_name.text().strip()
-        pw = self.ed_login_pw.text().strip()
-        key = (
-            self.ed_login_key.text().strip()
-            if hasattr(self, "ed_login_key") and self.ed_login_key.isVisible()
-            else ""
-        )
+        pilot, email, pw, key = _startup_auth_credentials(self)
+        if hasattr(self, "ed_login_key") and self.ed_login_key.isVisible():
+            key = self.ed_login_key.text().strip() or key
         self._platin_fresh_login = True
         _clear_stale_login_identity(main_module, self._path)
         hid = _normalize_client_hwid(main_module, self._path, force_os=True)
-        if not pilot or not pw or not hid:
+        if not email or "@" not in email or not pw or not hid:
             QMessageBox.warning(
                 self,
                 main_module.SKYTYCOON_APP_NAME,
                 main_module._st_auth_tr(
-                    self._path, "startup.auth.fill_all", "Bitte alle Felder ausfüllen."
+                    self._path,
+                    "startup.auth.fill_all",
+                    "Bitte E-Mail (skytycoon.info) und Passwort ausfüllen. "
+                    "Pilot optional.",
                 ),
             )
             return
-        body = _desktop_auth_login_body(main_module, self._path, pilot, pw, key)
+        body = _desktop_auth_login_body(
+            main_module, self._path, pilot, pw, key, portal_email=email
+        )
         parent_win = getattr(self, "parent_window", None) or self.parent()
         try:
             r = requests.post(
@@ -2291,6 +3863,7 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
                 headers={
                     "User-Agent": f"{main_module.SKYTYCOON_APP_NAME}/{main_module.APP_VERSION}",
                     "Content-Type": "application/json",
+                    "Accept": "application/json",
                 },
                 verify=main_module.auth_requests_verify_tls(),
             )
@@ -2314,6 +3887,16 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
         st = str(j.get("status", ""))
         if st == "login_success" or j.get("portal_account") or j.get("is_superadmin"):
             self._platin_pending_login_json = j
+        if isinstance(j, dict) and (
+            st == "login_success"
+            or j.get("access_token")
+            or j.get("session_token")
+            or j.get("token")
+        ):
+            _platin_anchor_jwt_on_parent(
+                main_module, self._path, j, dlg=self, win=parent_win
+            )
+            _platin_pull_user_profile_sync(main_module, self._path, parent_win)
         if st == "login_failed":
             detail = str(j.get("detail") or "").strip().lower()
             msg_fail = str(
@@ -2337,9 +3920,14 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
             or int(j.get("has_license") or 0)
         )
         if st == "login_success" and slot_ok:
-            _store_login_access_token(main_module, self._path, j)
-            main_module.app_meta_set(self._path, "pilot_display_name", pilot[:120])
-            main_module.app_meta_set(self._path, "pilot_name", pilot[:120])
+            _store_login_access_token(main_module, self._path, j, win=parent_win)
+            pilot_srv = str(
+                j.get("pilot_name")
+                or j.get("username")
+                or (email.split("@", 1)[0] if email and "@" in email else "")
+            ).strip()[:120]
+            main_module.app_meta_set(self._path, "pilot_display_name", pilot_srv[:120])
+            main_module.app_meta_set(self._path, "pilot_name", pilot_srv[:120])
             main_module.app_meta_set(self._path, "license_activated", "1")
             main_module.app_meta_set(self._path, "online_network_enabled", "1")
             lk_slot = str(j.get("license_key") or key or "").strip()
@@ -2347,7 +3935,7 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
                 main_module.app_meta_set(
                     self._path, "license_key_installed", lk_slot[:256]
                 )
-            em_slot = _resolve_portal_email_from_login(pilot, j)
+            em_slot = _resolve_portal_email_from_login(pilot_srv, j) or email
             if em_slot:
                 main_module.app_meta_set(self._path, "portal_email", em_slot)
                 main_module.app_meta_set(
@@ -2411,7 +3999,7 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
                 _platin_login_accept(self, main_module, self._path, j)
             return
         if st == "login_success" and j.get("portal_account") and not int(j.get("has_license") or 0):
-            _store_login_access_token(main_module, self._path, j)
+            _store_login_access_token(main_module, self._path, j, win=parent_win)
             main_module.app_meta_set(self._path, "pilot_display_name", pilot[:120])
             main_module.app_meta_set(self._path, "license_activated", "0")
             main_module.app_meta_set(self._path, "drm_last_status", "portal_free")
@@ -2454,8 +4042,10 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
             _platin_login_accept(self, main_module, self._path, j)
             return
         if str(j.get("role", "")).upper() == "SUPERADMIN" or j.get("is_superadmin"):
-            _store_login_access_token(main_module, self._path, j)
-            main_module.app_meta_set(self._path, "portal_email", GLOBAL_SUPERADMIN_EMAIL)
+            _store_login_access_token(main_module, self._path, j, win=parent_win)
+            em_sa = _resolve_portal_email_from_login(pilot, j) or email
+            if em_sa:
+                main_module.app_meta_set(self._path, "portal_email", em_sa)
             main_module.app_meta_set(self._path, "license_activated", "1")
             main_module.app_meta_set(self._path, "online_network_enabled", "1")
             main_module.app_meta_set(self._path, "platin_superadmin", "1")
@@ -2474,7 +4064,7 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
         if st == "login_success" and (
             int(j.get("has_license") or 0) or j.get("auto_license_activated")
         ):
-            _store_login_access_token(main_module, self._path, j)
+            _store_login_access_token(main_module, self._path, j, win=parent_win)
             main_module.app_meta_set(self._path, "license_activated", "1")
             lk_ok = str(j.get("license_key") or key or "").strip()
             if lk_ok:
@@ -2495,7 +4085,7 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
                 main_module.app_meta_set(self._path, "selected_language", lg_ok)
                 main_module.app_meta_set(self._path, "ui_lang", lg_ok)
         if st == "login_success":
-            _store_login_access_token(main_module, self._path, j)
+            _store_login_access_token(main_module, self._path, j, win=parent_win)
             main_module.app_meta_set(self._path, "pilot_display_name", pilot[:120])
             main_module.app_meta_set(self._path, "pilot_name", pilot[:120])
             if pw:
@@ -2708,10 +4298,13 @@ def platin_prepare_coldstart() -> None:
     """Vor Splash/Update: Riegel auf __main__ + main (idempotent)."""
     global _PLATIN_BLOCK_STARTUP_POPUPS
     _PLATIN_BLOCK_STARTUP_POPUPS = True
+    _platin_v46_tresor_sweep(None, None, None, announce=True)
     _install_platin_coldstart_guards()
     mods = _runtime_main_modules()
     if mods:
         _platin_bind_dynamic_project_roots(mods[0])
+        dbp = getattr(mods[0], "DB_PATH", None)
+        _kaltstart_nuke_login_tresor(mods[0], dbp)
     _platin_apply_patches_to_runtime_modules()
 
 
@@ -2725,7 +4318,12 @@ def _run_standalone_startup_auth(main_mod: Any, db_path: Any) -> bool:
     dlg = dlg_cls(db_path, None)
     _prepare_startup_auth_dialog(dlg, main_mod)
     has_saved = _prepare_startup_auth_remember_prefill(dlg, main_mod, db_path)
-    if has_saved and getattr(dlg, "b_login", None) is not None:
+    if (
+        has_saved
+        and getattr(dlg, "_platin_remember_cb", None) is not None
+        and dlg._platin_remember_cb.isChecked()
+        and getattr(dlg, "b_login", None) is not None
+    ):
 
         def _auto_login() -> None:
             try:
@@ -2736,22 +4334,19 @@ def _run_standalone_startup_auth(main_mod: Any, db_path: Any) -> bool:
 
         QTimer.singleShot(600, _auto_login)
     accepted = dlg.exec() == QDialog.DialogCode.Accepted
-    if accepted:
-        pending = getattr(dlg, "_platin_pending_login_json", None)
-        _platin_persist_remember_me(
-            dlg,
-            main_mod,
-            db_path,
-            pending if isinstance(pending, dict) else {},
-        )
     try:
         dlg.deleteLater()
     except RuntimeError:
         pass
     if not accepted:
         return False
+    _platin_commit_premain_login(main_mod, db_path, dlg)
     _PLATIN_BLOCK_STARTUP_POPUPS = False
     _PLATIN_PREMAIN_AUTH_OK = True
+    try:
+        main_mod._platin_user_logged_in = True
+    except Exception:
+        pass
     return True
 
 
@@ -2764,8 +4359,10 @@ def platin_pre_mainwindow_login(db_path: Any) -> bool:
             import main as main_mod
         except Exception:
             return False
-    platin_prepare_coldstart()
+    _install_platin_coldstart_guards()
     _platin_apply_patches_to_runtime_modules()
+    _kaltstart_nuke_login_tresor(main_mod, db_path)
+    _platin_coldstart_sanitize_session(main_mod, db_path)
     if _PLATIN_PREMAIN_AUTH_OK:
         return True
     return _run_standalone_startup_auth(main_mod, db_path)
@@ -2900,18 +4497,27 @@ def _patch_platin_meta_crash_shield(main_mod: Any) -> None:
         print(f"[SkyTycoon] Cloud-Only: {exc!s}", flush=True)
 
     def safe_app_meta_get(path: Any, key: str, default: str = "") -> str:
+        if key == "ionos_jwt":
+            win = _platin_find_active_main_window(main_mod)
+            return _platin_ram_jwt_from_win(win) or ""
         try:
-            from platin_cloud_only import (
-                hydrate_platin_credentials_from_disk,
-                platin_meta_get_safe,
-            )
+            from platin_cloud_only import platin_meta_get_safe
 
-            hydrate_platin_credentials_from_disk(main_mod)
             return platin_meta_get_safe(main_mod, key, default)
         except Exception:
             return default
 
     def safe_app_meta_set(path: Any, key: str, value: str) -> None:
+        if key == "ionos_jwt":
+            win = _platin_find_active_main_window(main_mod)
+            _platin_set_jwt_ram(win, str(value or ""))
+            try:
+                from platin_cloud_only import platin_meta_set_safe
+
+                platin_meta_set_safe(main_mod, key, "")
+            except Exception:
+                pass
+            return
         try:
             from platin_cloud_only import platin_meta_set_safe
 
@@ -2944,11 +4550,10 @@ def _patch_platin_meta_crash_shield(main_mod: Any) -> None:
 
         def safe_ionos_auth_headers(path: Any) -> dict[str, str]:
             try:
-                from platin_cloud_only import platin_meta_get_safe
-
-                tok = platin_meta_get_safe(main_mod, "ionos_jwt", "")
-                if tok:
-                    return {"Authorization": f"Bearer {tok}"}
+                win = _platin_find_active_main_window(main_mod)
+                hdr = _platin_bearer_headers(main_mod, path, win)
+                if hdr.get("Authorization"):
+                    return hdr
                 return _orig_ionos(path)
             except Exception:
                 return {}
@@ -3097,6 +4702,9 @@ def _platin_apply_patches_to_runtime_modules() -> list[Any]:
             continue
         _platin_bind_dynamic_project_roots(main_mod)
         _patch_platin_meta_crash_shield(main_mod)
+        _patch_ionos_canonical_hardware_binding(main_mod)
+        _patch_build_ionos_cloud_sync_body(main_mod)
+        _patch_customer_profile_identity(main_mod)
         _patch_branding_live_stamp_flood_guard(main_mod)
         _patch_post_show_init_safe(main_mod)
         _patch_platin_injector_ui_lang_safe()
@@ -3107,11 +4715,17 @@ def _platin_apply_patches_to_runtime_modules() -> list[Any]:
         _patch_live_cabin_soundboard(main_mod)
         _patch_update_check_once(main_mod)
         _patch_fids_live_board_fetch(main_mod)
+        _patch_platin_nam_jwt_bearer(main_mod)
         _patch_cloud_jobs_gzip_nam(main_mod)
         _patch_job_board_charter_lazy(main_mod)
+        _patch_dispatch_inner_lazy_materialize(main_mod)
+        _patch_accepted_jobs_max_two(main_mod)
+        _patch_flight_accepted_jobs_subtab(main_mod)
         _patch_premium_kundenkonto_dialog_logout(main_mod)
         _patch_gsx_start_handling(main_mod)
         _patch_profile_tab_hide_license(main_mod)
+        _patch_platin_kundenprofil_cloud_bypass(main_mod)
+        _patch_platin_email_only_cloud_ready(main_mod)
         _patch_job_board_haul_filters(main_mod)
         _patch_crew_refresh_safe(main_mod)
         from platin_career_layout import patch_career_original_layout
@@ -3121,6 +4735,12 @@ def _platin_apply_patches_to_runtime_modules() -> list[Any]:
         if db is not None:
             _patch_main_cloud_api_urls(main_mod, db)
         _patch_simconnect_telemetry_regulation(main_mod)
+        _patch_platin_cloud_html_views(main_mod)
+        _patch_platin_cloud_error_excepthook(main_mod)
+    global _PLATIN_TRESOR_BAM_PRINTED
+    if not _PLATIN_TRESOR_BAM_PRINTED:
+        _PLATIN_TRESOR_BAM_PRINTED = True
+        print(f"[SkyTycoon] {_PLATIN_CRASH_MONSTER_DEAD_MSG} ({PLATIN_BUILD})", flush=True)
     return mods
 
 
@@ -3323,6 +4943,24 @@ def _platin_nam_gzip_headers(req: Any) -> Any:
     return req
 
 
+def _patch_platin_nam_jwt_bearer(main_mod: Any) -> None:
+    """MainWindow._nam: Bearer + gzip bei jedem QNetworkRequest."""
+    win_cls = getattr(main_mod, "MainWindow", None)
+    if win_cls is None or getattr(win_cls, "_platin_nam_jwt_v46", False):
+        return
+    orig_init = win_cls.__init__
+
+    def __init_platin_nam_jwt(self: Any, *args: Any, **kwargs: Any) -> None:
+        orig_init(self, *args, **kwargs)
+        _arm_platin_nam_bearer(self, main_mod)
+
+    win_cls.__init__ = __init_platin_nam_jwt  # type: ignore[method-assign]
+    win_cls._platin_nam_jwt_v46 = True
+    existing = _platin_find_active_main_window(main_mod)
+    if existing is not None:
+        _arm_platin_nam_bearer(existing, main_mod)
+
+
 def _patch_cloud_jobs_gzip_nam(main_mod: Any) -> None:
     win_cls = getattr(main_mod, "MainWindow", None)
     if win_cls is None or getattr(win_cls, "_sky_jobs_gzip_patch", False):
@@ -3411,6 +5049,112 @@ def _patch_job_board_charter_lazy(main_mod: Any) -> None:
     win_cls._sky_charter_lazy_patch = True
 
 
+def _patch_dispatch_inner_lazy_materialize(main_mod: Any) -> None:
+    """Langstrecken-Reiter: Lazy-Platzhalter sofort durch echte Flugbörse ersetzen."""
+    win_cls = getattr(main_mod, "MainWindow", None)
+    if win_cls is None or getattr(win_cls, "_sky_dispatch_lazy_patch", False):
+        return
+    orig = win_cls._on_dispatch_inner_tab_changed
+
+    def _on_dispatch_inner_lazy(self: Any, index: int) -> None:
+        inj = getattr(self, "_platin_injector", None)
+        if inj is not None:
+            inj._ensure_zero_delay_lazy_tabs()
+            if index in (
+                getattr(self, "_dispatch_short_haul_subtab_ix", 0),
+                getattr(self, "_dispatch_jobs_subtab_ix", 1),
+            ):
+                inj._lazy_materialize_dispatch()
+        orig(self, index)
+
+    win_cls._on_dispatch_inner_tab_changed = _on_dispatch_inner_lazy
+    win_cls._sky_dispatch_lazy_patch = True
+
+
+def _patch_accepted_jobs_max_two(main_mod: Any) -> None:
+    """Max. 2 angenommene Aufträge — dritter erst nach Abschluss eines aktiven."""
+    win_cls = getattr(main_mod, "MainWindow", None)
+    if win_cls is None or getattr(win_cls, "_sky_accept_jobs_cap_patch", False):
+        return
+    db_path = getattr(main_mod, "DB_PATH", None)
+    accepted_list = getattr(main_mod, "accepted_jobs_list", None)
+    if db_path is None or not callable(accepted_list):
+        return
+    orig_accept = win_cls._on_accept_job_clicked
+    orig_complete = win_cls._complete_job_acceptance
+
+    def _active_accepted_count(self: Any) -> int:
+        try:
+            return len(list(accepted_list(db_path)))
+        except Exception:
+            return 0
+
+    def _on_accept_job_clicked_cap(self: Any) -> None:
+        n = _active_accepted_count(self)
+        if n >= 2:
+            QMessageBox.warning(
+                self,
+                self._tr("job.board_title", "Flug-Börse"),
+                self._tr(
+                    "job.accept_max_two",
+                    "Maximal 2 aktive Aufträge gleichzeitig. Bitte einen Auftrag "
+                    "im Tab „Aktive Aufträge“ oder „Aktueller Flug → Meine Jobs“ "
+                    "abschließen oder stornieren, bevor Sie einen weiteren annehmen.",
+                ),
+            )
+            return
+        orig_accept(self)
+
+    def _complete_job_acceptance_cap(self: Any, job: dict, jobs_count: int) -> None:
+        if _active_accepted_count(self) >= 2:
+            QMessageBox.warning(
+                self,
+                self._tr("job.board_title", "Flug-Börse"),
+                self._tr(
+                    "job.accept_max_two",
+                    "Maximal 2 aktive Aufträge gleichzeitig. Bitte zuerst einen "
+                    "bestehenden Auftrag fliegen oder stornieren.",
+                ),
+            )
+            return
+        orig_complete(self, job, jobs_count)
+
+    win_cls._on_accept_job_clicked = _on_accept_job_clicked_cap
+    win_cls._complete_job_acceptance = _complete_job_acceptance_cap
+    win_cls._sky_accept_jobs_cap_patch = True
+
+
+def _patch_flight_accepted_jobs_subtab(main_mod: Any) -> None:
+    """Unter-Reiter „Meine Jobs“ im Tab Aktueller Flug (angenommene Aufträge)."""
+    win_cls = getattr(main_mod, "MainWindow", None)
+    if win_cls is None or getattr(win_cls, "_sky_flight_jobs_subtab_patch", False):
+        return
+    orig_refresh = win_cls._refresh_active_dispatch_table
+
+    def _refresh_active_dispatch_table_dual(self: Any) -> None:
+        orig_refresh(self)
+        t2 = getattr(self, "table_flight_active_jobs", None)
+        t1 = getattr(self, "table_active_dispatch", None)
+        if t2 is None or t1 is None:
+            return
+        t2.setRowCount(0)
+        for r in range(t1.rowCount()):
+            t2.insertRow(r)
+            for c in range(t1.columnCount()):
+                src = t1.item(r, c)
+                if src is None:
+                    continue
+                it = QTableWidgetItem(src.text())
+                if c == 0:
+                    it.setData(Qt.ItemDataRole.UserRole, src.data(Qt.ItemDataRole.UserRole))
+                t2.setItem(r, c, it)
+        if hasattr(self, "_apply_active_dispatch_cancel_enabled"):
+            self._apply_active_dispatch_cancel_enabled()
+
+    win_cls._refresh_active_dispatch_table = _refresh_active_dispatch_table_dual
+    win_cls._sky_flight_jobs_subtab_patch = True
+
+
 def _patch_fids_live_board_fetch(main_mod: Any) -> None:
     """FIDS-Tafel: GET /api/v1/web/radar/positions von skytycoon.info (QThreadPool, kein Cache)."""
     win_cls = getattr(main_mod, "MainWindow", None)
@@ -3466,6 +5210,15 @@ def _patch_premium_kundenkonto_dialog_logout(main_mod: Any) -> None:
 
 
 def inject_platin_features(main_window: Any) -> None:
+    main_mod: Any | None = None
+    db_path: Any = None
+    try:
+        import main as main_mod
+    except Exception:
+        main_mod = None
+    if main_mod is not None:
+        db_path = getattr(main_mod, "DB_PATH", None)
+    _platin_v46_tresor_sweep(main_mod, db_path, main_window, announce=True)
     build_mismatch = getattr(main_window, "_platin_build", None) != PLATIN_BUILD
     if build_mismatch:
         main_window._platin_injected = False
@@ -3510,14 +5263,31 @@ def inject_platin_features(main_window: Any) -> None:
         main_window.setStyleSheet(_PLATIN_GLOBAL_DARK_STYLE)
     except RuntimeError:
         pass
+    if main_mod is not None:
+        _arm_platin_nam_bearer(main_window, main_mod)
     inj = _PlatinInjector(main_window)
     main_window._platin_injector = inj
     _apply_platin_global_dark_theme(main_window)
-    if _PLATIN_PREMAIN_AUTH_OK:
+    if _PLATIN_PREMAIN_AUTH_OK and main_mod is not None:
         main_window._platin_auth_gate_done = True
         main_window._platin_coldstart_login_complete = True
         main_window._platin_license_trusted = True
         main_window._platin_license_prompt_block_until = time.time() + 86400.0
+        try:
+            from platin_cloud_only import ensure_platin_session_db
+
+            ensure_platin_session_db(main_mod)
+            tok = _platin_ram_jwt_from_win(main_window)
+            if tok:
+                _platin_anchor_jwt_ram(
+                    main_mod,
+                    main_mod.DB_PATH,
+                    {"access_token": tok},
+                    win=main_window,
+                )
+            _platin_apply_cockpit_identity(main_window, main_mod, main_mod.DB_PATH)
+        except Exception:
+            pass
 
     def _arm_platin_ui() -> None:
         if getattr(main_window, "_platin_run_armed", False):
@@ -3605,6 +5375,21 @@ class _PlatinInjector:
         self._bus.charter_api_fail.connect(self._on_charter_api_fail)
         self._bus.pax_feedback_ready.connect(self._on_pax_feedback_ready)
         self._bus.p2p_board_ready.connect(self._on_p2p_board_ready)
+        self._bus.thin_tab_ready.connect(self._on_thin_tab_ready)
+        self._bus.thin_tab_fail.connect(self._on_thin_tab_fail)
+        self._bus.sse_tick.connect(self._on_sse_tick)
+        self._bus.html_page_ready.connect(
+            self._bus.deliver_html_page, Qt.ConnectionType.QueuedConnection
+        )
+        self._bus.html_page_fail.connect(
+            self._on_html_page_fail, Qt.ConnectionType.QueuedConnection
+        )
+        self._bus.profit_svg_ready.connect(
+            self._bus.deliver_profit_svg, Qt.ConnectionType.QueuedConnection
+        )
+        self._bus.profit_svg_fail.connect(
+            self._on_profit_svg_fail, Qt.ConnectionType.QueuedConnection
+        )
         self._sync_busy = False
         self._cloud_save_armed = False
         self._last_graceful_save = False
@@ -3632,15 +5417,14 @@ class _PlatinInjector:
             self.db_path = self.m.DB_PATH
         except Exception:
             pass
-        headers = {
-            "User-Agent": f"{self.m.SKYTYCOON_APP_NAME}/{self.m.APP_VERSION}",
-            "Content-Type": "application/json",
-            "Accept-Encoding": "gzip, deflate",
-        }
-        tok = (self.m.app_meta_get(self.db_path, "ionos_jwt", "") or "").strip()
-        if tok:
-            headers["Authorization"] = f"Bearer {tok}"
-        return headers
+        return _platin_bearer_headers(
+            self.m,
+            self.db_path,
+            self.win,
+            extra={
+                "Content-Type": "application/json",
+            },
+        )
 
     def _online(self) -> bool:
         return self.m.online_network_enabled(self.db_path)
@@ -3668,7 +5452,6 @@ class _PlatinInjector:
         _inject_auto_login_settings_menu(self.win, self.m, self.db_path)
         self._wire_profile_branches_sync()
         self._wire_cloud_sync_engine()
-        self._install_zero_delay_lazy_tabs()
         self._install_lazy_hub_hooks()
         self._arm_swiss_code_backup_timer()
         _apply_platin_global_dark_theme(self.win)
@@ -3708,6 +5491,7 @@ class _PlatinInjector:
             self._fix_crew_hub_overlap()
             self._inject_gsx_remote_control()
             self._inject_logout_button()
+            self._inject_flight_accepted_jobs_subtab_ui()
             self._apply_global_scroll_armor()
         finally:
             self.win.setUpdatesEnabled(True)
@@ -3717,7 +5501,20 @@ class _PlatinInjector:
             flush=True,
         )
         QTimer.singleShot(80, self._apply_bank_hub_tab_labels)
-        QTimer.singleShot(1400, self._ensure_alliance_13_hub)
+        QTimer.singleShot(
+            2400,
+            lambda: self._fetch_thin_tab_async("alliance"),
+        )
+        QTimer.singleShot(
+            2600,
+            lambda: self._pool().start(
+                _FnRunnable(
+                    lambda: _platin_invoke_on_main_thread(
+                        self.win, self._ensure_alliance_13_hub
+                    )
+                )
+            ),
+        )
 
     def _force_reapply_ui_layouts(self) -> None:
         """Nach Extensions-Update ohne App-Neustart: Layout-Patches erneut."""
@@ -3988,18 +5785,228 @@ class _PlatinInjector:
         self._pool().start(_FnRunnable(_work))
 
     def _arm_radar_heartbeat_funk(self) -> None:
-        """Permanenter 5s-Live-Radar (FIDS + Discord) — läuft im QThreadPool, UI bleibt frei."""
+        """Server-SSE 1 Hz + seltener Radar-POST (kein lokaler Timer-Stau)."""
         if getattr(self.win, "_platin_radar_heartbeat_armed", False):
             return
         self.win._platin_radar_heartbeat_armed = True
         self.win._platin_radar_session_init = getattr(
             self.win, "_platin_radar_session_init", False
         )
+        if not getattr(self.win, "_platin_sse_armed", False):
+            self.win._platin_sse_armed = True
+            self._pool().start(_PlatinSseHeartbeatRunnable(self))
         self._radar_hb_timer = QTimer(self.win)
-        self._radar_hb_timer.setInterval(RADAR_HEARTBEAT_MS)
+        self._radar_hb_timer.setInterval(max(RADAR_HEARTBEAT_MS, 8000))
         self._radar_hb_timer.timeout.connect(self._fire_radar_heartbeat_async)
         self._radar_hb_timer.start()
-        QTimer.singleShot(0, self._fire_radar_heartbeat_async)
+        QTimer.singleShot(1200, self._fire_radar_heartbeat_async)
+
+    def _on_sse_tick(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        tick_fn = getattr(self.win, "_fids_heartbeat_tick", None)
+        if callable(tick_fn) and payload.get("fids_rotate"):
+            try:
+                tick_fn()
+            except Exception:
+                pass
+        pulse = getattr(self.win, "career_dash_pulse_timer", None)
+        if pulse is not None and payload.get("career_pulse"):
+            try:
+                if not pulse.isActive():
+                    pulse.start()
+            except RuntimeError:
+                pass
+
+    def _fetch_thin_tab_async(self, tab_key: str) -> None:
+        self._pool().start(_ThinTabFetchRunnable(self, tab_key))
+
+    def _on_thin_tab_ready(self, tab_key: str, data: object) -> None:
+        if not isinstance(data, dict):
+            return
+        self.win._platin_last_thin_tab = {str(tab_key): data}
+        key = str(tab_key).lower()
+        if key in ("alliance", "allianz", "alliance13"):
+            _platin_invoke_on_main_thread(self.win, self._ensure_alliance_13_hub)
+            self._pool().start(_HtmlPageFetchRunnable(self, "alliance", 1))
+            self._pool().start(_HtmlPageFetchRunnable(self, "alliance_tech", 1))
+            self._warm_cdn_asset_cache()
+        elif key in ("hangar", "werft", "fleet"):
+            _platin_invoke_on_main_thread(self.win, self._ensure_hangar_werft_hub)
+
+    def _on_thin_tab_fail(self, tab_key: str, err: str) -> None:
+        _ = tab_key, err
+        key = str(tab_key).lower()
+        if key in ("alliance", "allianz", "alliance13"):
+            _platin_invoke_on_main_thread(self.win, self._ensure_alliance_13_hub)
+        elif key in ("hangar", "werft", "fleet"):
+            _platin_invoke_on_main_thread(self.win, self._ensure_hangar_werft_hub)
+
+    def _ui_lang_code(self) -> str:
+        return "en" if self._ui_lang_en() else "de"
+
+    def _fetch_profit_svg_async(self) -> None:
+        if not self._online():
+            return
+        self._pool().start(_ProfitSvgFetchRunnable(self))
+
+    def _on_html_page_ready(self, view_key: str, html: str, page: int) -> None:
+        _platin_invoke_on_main_thread(
+            self.win,
+            lambda vk=view_key, h=html, p=page: self._apply_html_page_main_thread(
+                vk, h, p
+            ),
+        )
+
+    def _apply_html_page_main_thread(
+        self, view_key: str, html: str, page: int
+    ) -> None:
+        app = QApplication.instance()
+        if app is not None and QThread.currentThread() is not app.thread():
+            _platin_deliver_html_to_main_thread(self, view_key, html, page)
+            return
+        key = str(view_key).lower()
+        host_map = {
+            "jobs": "_platin_jobs_html",
+            "job": "_platin_jobs_html",
+            "market": "_platin_jobs_html",
+            "logbook": "_platin_logbook_html",
+            "log": "_platin_logbook_html",
+            "flights": "_platin_logbook_html",
+            "support": "_platin_support_html",
+            "helpdesk": "_platin_support_html",
+            "tickets": "_platin_support_html",
+            "alliance": "_platin_alliance_html",
+            "allianz": "_platin_alliance_html",
+            "hq": "_platin_alliance_html",
+            "alliance_tech": "_platin_alliance_tech_html",
+            "alliance-tech": "_platin_alliance_tech_html",
+            "tech_tree": "_platin_alliance_tech_html",
+            "tech": "_platin_alliance_tech_html",
+        }
+        attr = host_map.get(key)
+        if not attr:
+            return
+        host = getattr(self.win, attr, None)
+        if host is None and key in ("alliance", "allianz", "hq"):
+            alliance_host = getattr(self.win, "tab_alliances", None)
+            if alliance_host is not None:
+                _platin_sterile_wipe_layout(alliance_host)
+                host = _PlatinCloudHtmlPanel(self, key, alliance_host)
+                lay = alliance_host.layout()
+                if lay is None:
+                    lay = QVBoxLayout(alliance_host)
+                lay.addWidget(host, 1)
+                setattr(self.win, attr, host)
+        if host is None and key in (
+            "alliance_tech",
+            "alliance-tech",
+            "tech_tree",
+            "tech",
+        ):
+            center = getattr(self.win, "_platin_alliance_13_center", None)
+            if center is not None:
+                _platin_sterile_wipe_layout(center)
+                host = _PlatinCloudHtmlPanel(self, "alliance_tech", center)
+                lay = center.layout()
+                if lay is None:
+                    lay = QVBoxLayout(center)
+                lay.insertWidget(0, host, 0)
+                setattr(self.win, attr, host)
+        if host is None and key in ("support", "helpdesk", "tickets"):
+            support_host = getattr(self.win, "_platin_support_tab_host", None)
+            if support_host is None:
+                dlg = getattr(self.win, "_support_troubleshoot_dialog", None)
+                if dlg is not None:
+                    support_host = getattr(dlg, "_platin_support_tab", None)
+            if support_host is not None:
+                _platin_sterile_wipe_layout(support_host)
+                host = _PlatinCloudHtmlPanel(self, "support", support_host)
+                lay = support_host.layout()
+                if lay is None:
+                    lay = QVBoxLayout(support_host)
+                lay.addWidget(host, 1)
+                setattr(self.win, attr, host)
+        if isinstance(host, _PlatinCloudHtmlPanel):
+            host._page = int(page or 1)
+            host.set_html(html)
+
+    def _on_html_page_fail(self, view_key: str, err: str) -> None:
+        key = str(view_key).lower()
+        msg = (
+            f"<p style='color:#ff8a80'>Cloud-HTML ({key}): "
+            f"{html_module.escape(str(err)[:200])}</p>"
+        )
+        if "401" in str(err) or "403" in str(err):
+            msg += (
+                "<p style='color:#8ac7ff'>JWT abgelaufen — bitte neu anmelden.</p>"
+            )
+
+        def _show_err() -> None:
+            host_map = {
+                "jobs": "_platin_jobs_html",
+                "alliance": "_platin_alliance_html",
+                "support": "_platin_support_html",
+            }
+            attr = host_map.get(key)
+            if attr:
+                host = getattr(self.win, attr, None)
+                if isinstance(host, _PlatinCloudHtmlPanel):
+                    host.set_html(msg)
+
+        _platin_invoke_on_main_thread(self.win, _show_err)
+
+    def _on_profit_svg_ready(self, svg_text: str) -> None:
+        _platin_invoke_on_main_thread(
+            self.win,
+            lambda s=svg_text: self._apply_profit_svg_main_thread(s),
+        )
+
+    def _apply_profit_svg_main_thread(self, svg_text: str) -> None:
+        app = QApplication.instance()
+        if app is not None and QThread.currentThread() is not app.thread():
+            _platin_deliver_profit_svg_to_main_thread(self, svg_text)
+            return
+        browser = getattr(self.win, "_platin_profit_svg_browser", None)
+        if browser is None:
+            career_ix = getattr(self.win, "_hub_ix_career", None)
+            inner = getattr(self.win, "_hub_tabwidgets", {}).get(career_ix)
+            if not isinstance(inner, QTabWidget):
+                return
+            for i in range(inner.count()):
+                if "profit" in (inner.tabText(i) or "").lower():
+                    page = inner.widget(i)
+                    if page is None:
+                        continue
+                    scroll = page
+                    if isinstance(page, QScrollArea):
+                        scroll = page.widget()
+                    if scroll is None:
+                        continue
+                    lay = scroll.layout()
+                    if lay is None:
+                        continue
+                    browser = QTextBrowser(scroll)
+                    browser.setMaximumHeight(130)
+                    browser.setStyleSheet(
+                        f"QTextBrowser{{background:{PLATIN_CYBER_COLORS['bg']};"
+                        f"border:1px solid #1a2a3d;}}"
+                    )
+                    lay.insertWidget(1, browser)
+                    self.win._platin_profit_svg_browser = browser
+                    break
+        if browser is not None and svg_text:
+            b64 = base64.b64encode(svg_text.encode("utf-8")).decode("ascii")
+            browser.setHtml(
+                f'<html><body style="margin:0;background:#0b0f19;">'
+                f'<img src="data:image/svg+xml;base64,{b64}" width="460"/></body></html>'
+            )
+
+    def _on_profit_svg_fail(self, err: str) -> None:
+        _ = err
+
+    def _warm_cdn_asset_cache(self) -> None:
+        self._pool().start(_PlatinAssetCacheRunnable())
 
     def _fire_radar_heartbeat_async(self) -> None:
         if self.m.app_meta_get(self.db_path, "license_activated", "0") != "1":
@@ -4208,9 +6215,16 @@ class _PlatinInjector:
         self._after_platin_login_success()
 
     def _after_platin_login_success(self) -> None:
+        try:
+            self.m._platin_user_logged_in = True
+        except Exception:
+            pass
+        _platin_inject_profile_cloud_credentials(self.m, self.db_path, self.win)
+        _platin_verify_session_transfer(self.m, self.db_path)
         _platin_instant_cockpit_open(self.win)
         _show_main_cockpit(self.win)
         _unlock_six_main_hub_tabs(self.win)
+        _platin_apply_cockpit_identity(self.win, self.m, self.db_path)
         lang_meta = (
             self.m.app_meta_get(self.db_path, "selected_language", "")
             or self.m.app_meta_get(self.db_path, "ui_lang", "")
@@ -4223,10 +6237,11 @@ class _PlatinInjector:
                 self.win._arm_radar_after_login()
             except Exception:
                 pass
-        self.win._platin_fresh_cloud_sync = True
+        self.win._platin_fresh_cloud_sync = _platin_should_fresh_cloud_sync(
+            self.m, self.db_path
+        )
         QTimer.singleShot(600, self._cloud_sync_pull_async)
-        QTimer.singleShot(900, self._ensure_alliance_13_hub)
-        QTimer.singleShot(2200, self._ensure_alliance_13_hub)
+        QTimer.singleShot(1800, self._ensure_alliance_13_hub)
 
     def _apply_bank_hub_tab_labels(self) -> None:
         """Hub „Bank“ ohne main.py-Layout-Änderung (nur Tab-Titel)."""
@@ -4554,6 +6569,12 @@ class _PlatinInjector:
         alliance_host = getattr(self.win, "tab_alliances", None)
         if mit is None or alliance_host is None:
             return
+        try:
+            from platin_alliance_center import sterile_purge_widget_layout
+
+            sterile_purge_widget_layout(alliance_host)
+        except Exception:
+            pass
         en = self._ui_lang_en()
         move_keys = (
             "wallstreet /",
@@ -4578,6 +6599,12 @@ class _PlatinInjector:
 
         alliance_tabs = getattr(self.win, "_platin_alliance_tabs", None)
         if alliance_tabs is None:
+            try:
+                from platin_alliance_center import sterile_purge_widget_layout
+
+                sterile_purge_widget_layout(alliance_host)
+            except Exception:
+                pass
             old_lay = alliance_host.layout()
             if not isinstance(old_lay, QVBoxLayout):
                 return
@@ -5143,27 +7170,39 @@ class _PlatinInjector:
         return fx
 
     def _play_cabin_wav_qsound(self, filename: str) -> bool:
-        self._mirror_cabin_wav_to_cwd(filename)
-        path_str = self._cabin_sound_path_str(filename)
-        p = Path(path_str.replace("/", os.sep))
-        if not _cabin_audio_is_real(p):
-            path_str = self._platin_forward_sound_path(filename)
-            p = Path(path_str.replace("/", os.sep))
-        if not _cabin_audio_is_real(p) and not (
-            p.is_file() and p.suffix.lower() == ".mp3" and p.stat().st_size > 8000
-        ):
-            return False
-        path_abs = str(p.resolve()).replace("\\", "/")
         vol = max(
             PLATIN_CABIN_DEFAULT_VOL / 100.0,
             self._platin_cabin_volume_pct() / 100.0,
         )
+        fname = (filename or "").strip().lstrip("/")
+        if not fname:
+            return False
 
         def _fire_play() -> None:
             try:
                 fx = self._ensure_cabin_qsound()
                 fx.stop()
-                url = QUrl.fromLocalFile(path_abs)
+                url = QUrl()
+                for base in CABIN_CDN_BASES:
+                    cdn = QUrl(f"{base.rstrip('/')}/{fname}")
+                    if not cdn.isEmpty():
+                        url = cdn
+                        break
+                if url.isEmpty():
+                    self._mirror_cabin_wav_to_cwd(fname)
+                    path_str = self._cabin_sound_path_str(fname)
+                    p = Path(path_str.replace("/", os.sep))
+                    if not _cabin_audio_is_real(p):
+                        path_str = self._platin_forward_sound_path(fname)
+                        p = Path(path_str.replace("/", os.sep))
+                    if not _cabin_audio_is_real(p) and not (
+                        p.is_file()
+                        and p.suffix.lower() == ".mp3"
+                        and p.stat().st_size > 8000
+                    ):
+                        return
+                    path_abs = str(p.resolve()).replace("\\", "/")
+                    url = QUrl.fromLocalFile(path_abs)
                 if url.isEmpty():
                     return
                 fx.setSource(url)
@@ -5696,6 +7735,15 @@ class _PlatinInjector:
             if _PLATIN_PREMAIN_AUTH_OK:
                 self.win._platin_license_trusted = True
                 self.win._platin_license_prompt_block_until = time.time() + 86400.0
+            try:
+                from platin_cloud_only import ensure_platin_session_db
+
+                ensure_platin_session_db(self.m)
+                self.db_path = self.m.DB_PATH
+            except Exception:
+                pass
+            _platin_verify_session_transfer(self.m, self.db_path)
+            _platin_apply_cockpit_identity(self.win, self.m, self.db_path)
             self._after_platin_login_success()
             self._post_auth_bootstrap()
             return
@@ -5712,19 +7760,25 @@ class _PlatinInjector:
             return
         if getattr(self.win, "_platin_license_trusted", False):
             _unlock_six_main_hub_tabs(self.win)
-            self.win._platin_fresh_cloud_sync = True
+            self.win._platin_fresh_cloud_sync = _platin_should_fresh_cloud_sync(
+                self.m, self.db_path
+            )
             self._cloud_sync_pull_async()
             return
         if self.m.app_meta_get(self.db_path, "license_activated", "0") == "1":
             _unlock_six_main_hub_tabs(self.win)
-            self.win._platin_fresh_cloud_sync = True
+            self.win._platin_fresh_cloud_sync = _platin_should_fresh_cloud_sync(
+                self.m, self.db_path
+            )
             self._cloud_sync_pull_async()
             return
         if getattr(self.win, "_platin_license_pending", False):
             self.win._platin_license_pending = False
             QTimer.singleShot(0, self._show_license_dialog)
             return
-        self.win._platin_fresh_cloud_sync = True
+        self.win._platin_fresh_cloud_sync = _platin_should_fresh_cloud_sync(
+            self.m, self.db_path
+        )
         self._enforce_license_or_lock()
 
     def _enforce_license_or_lock(self) -> None:
@@ -5904,7 +7958,7 @@ class _PlatinInjector:
                 )
                 j = r.json()
                 ok = bool(j.get("ok"))
-                _store_login_access_token(self.m, self.db_path, j)
+                _store_login_access_token(self.m, self.db_path, j, win=self.win)
                 if str(j.get("role", "")).upper() == "SUPERADMIN" or j.get("is_superadmin"):
                     self.m.app_meta_set(self.db_path, "platin_superadmin", "1")
                     self.m.app_meta_set(self.db_path, "online_network_enabled", "1")
@@ -5912,7 +7966,7 @@ class _PlatinInjector:
                         j.get("email")
                         or payload.get("portal_email")
                         or payload.get("email")
-                        or GLOBAL_SUPERADMIN_EMAIL
+                        or next(iter(_superadmin_emails_from_env()), "")
                     ).strip().lower()
                     if em_sa and "@" in em_sa:
                         self.m.app_meta_set(self.db_path, "portal_email", em_sa[:200])
@@ -5957,6 +8011,7 @@ class _PlatinInjector:
                             or ""
                         ).strip().lower()[:8]
                     self.m.apply_server_profile_authority(self.db_path, profile)
+                    _platin_apply_profile_identity(self.m, self.db_path, self.win, j)
                     QTimer.singleShot(0, lambda p=profile: self._apply_gui_from_profile(p))
                     win_ok = self.win
                     QTimer.singleShot(
@@ -5991,6 +8046,7 @@ class _PlatinInjector:
                 self.win._refresh_credits_label()
 
     def _apply_gui_from_profile(self, profile: dict[str, Any]) -> None:
+        _platin_apply_profile_identity(self.m, self.db_path, self.win, profile)
         cred = float(profile.get("credits", 0) or 0)
         xp_v = float(profile.get("xp", 0) or 0)
         for attr, val in (("credits", cred), ("xp", xp_v)):
@@ -7590,8 +9646,14 @@ class _PlatinInjector:
                 except RuntimeError:
                     pass
 
+    def _ensure_zero_delay_lazy_tabs(self) -> None:
+        """Lazy-Stow erst beim ersten Besuch der Flugbörse (schnellerer Start)."""
+        if not getattr(self.win, "_platin_zero_lazy_installed", False):
+            self._install_zero_delay_lazy_tabs()
+
     def _lazy_on_main_tab(self, index: int) -> None:
         if index == int(getattr(self.win, "_hub_ix_dispatch", -999)):
+            self._ensure_zero_delay_lazy_tabs()
             self._lazy_materialize_dispatch()
         elif index == int(getattr(self.win, "_tab_ix_fids", -999)):
             self._lazy_materialize_fids()
@@ -7612,6 +9674,91 @@ class _PlatinInjector:
 
         self.win._on_main_tab_changed_impl = _wrapped
 
+    def _inject_flight_accepted_jobs_subtab_ui(self) -> None:
+        if getattr(self.win, "_platin_flight_jobs_subtab_ui", False):
+            return
+        dix = int(getattr(self.win, "_hub_ix_dispatch", -1))
+        inner = getattr(self.win, "_hub_tabwidgets", {}).get(dix)
+        if not isinstance(inner, QTabWidget):
+            return
+        flight_ix = int(getattr(self.win, "_dispatch_flight_subtab_ix", 2))
+        if flight_ix < 0 or flight_ix >= inner.count():
+            return
+        shell = inner.widget(flight_ix)
+        flight_root = shell
+        if isinstance(shell, QScrollArea):
+            flight_root = shell.widget()
+        if flight_root is None:
+            return
+        lay = flight_root.layout()
+        if lay is None:
+            return
+        if getattr(self.win, "table_flight_active_jobs", None) is not None:
+            self.win._platin_flight_jobs_subtab_ui = True
+            return
+        tabs = QTabWidget()
+        tabs.setObjectName("platinFlightInnerTabs")
+        page_live = QWidget()
+        live_lay = QVBoxLayout(page_live)
+        live_lay.setContentsMargins(0, 0, 0, 0)
+        while lay.count():
+            item = lay.takeAt(0)
+            if item is None:
+                continue
+            w = item.widget()
+            if w is not None:
+                live_lay.addWidget(w)
+            elif item.layout() is not None:
+                live_lay.addLayout(item.layout())
+        page_jobs = QWidget()
+        jobs_lay = QVBoxLayout(page_jobs)
+        hint = QLabel(
+            self._tr(
+                "flight.accepted_jobs_hint",
+                "Angenommene Aufträge (max. 2). Abschluss per Flug → Credits/XP "
+                "werden mit dem Cloud-Konto synchronisiert.",
+            )
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#8ac7ff;font-size:12px;padding:6px;")
+        jobs_lay.addWidget(hint)
+        tbl = QTableWidget(0, 6)
+        tbl.setObjectName("tableFlightActiveJobs")
+        tbl.setAlternatingRowColors(True)
+        tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        tbl.setHorizontalHeaderLabels(
+            [
+                self._tr("job.active_hdr_route", "Route (ICAO)"),
+                self._tr("job.active_hdr_ac", "Flugzeug"),
+                self._tr("job.active_hdr_crew", "Crew"),
+                self._tr("job.active_hdr_payload", "Fracht / PAX"),
+                self._tr("job.active_hdr_reward", "Belohnung"),
+                self._tr("job.active_hdr_status", "Status"),
+            ]
+        )
+        self.win.table_flight_active_jobs = tbl
+        jobs_lay.addWidget(tbl, stretch=1)
+        en = self._ui_lang_en()
+        tabs.addTab(
+            page_live,
+            self._tr("flight.subtab.live", "Live & Mission"),
+        )
+        tabs.addTab(
+            page_jobs,
+            self._tr("flight.subtab.accepted", "Meine Jobs (max. 2)"),
+        )
+        lay.addWidget(tabs, 1)
+        self.win._platin_flight_jobs_subtab_ui = True
+        ref = getattr(self.win, "_refresh_active_dispatch_table", None)
+        if callable(ref):
+            try:
+                ref()
+            except Exception:
+                pass
+        tabs.currentChanged.connect(
+            lambda ix: ref() if ix == 1 and callable(ref) else None
+        )
+
     def _lazy_prepare_hub(self, index: int) -> None:
         hangar_ix = getattr(self.win, "_hub_ix_hangar", -999)
         alliance_ix = int(
@@ -7623,11 +9770,27 @@ class _PlatinInjector:
         )
         career_ix = getattr(self.win, "_hub_ix_career", -999)
         if index == hangar_ix:
-            self._ensure_hangar_werft_hub()
+            self._fetch_thin_tab_async("hangar")
+            self._pool().start(
+                _FnRunnable(
+                    lambda: _platin_invoke_on_main_thread(
+                        self.win, self._ensure_hangar_werft_hub
+                    )
+                )
+            )
         elif index == alliance_ix:
-            self._ensure_alliance_13_hub()
+            self._fetch_thin_tab_async("alliance")
+            self._pool().start(
+                _FnRunnable(
+                    lambda: _platin_invoke_on_main_thread(
+                        self.win, self._ensure_alliance_13_hub
+                    )
+                )
+            )
         elif index == career_ix:
             self._lazy_materialize_career_charts()
+        elif index == int(getattr(self.win, "_hub_ix_dispatch", -999)):
+            self._ensure_zero_delay_lazy_tabs()
 
     def _ensure_hangar_werft_hub(self) -> None:
         if getattr(self.win, "_platin_hangar_restructured", False):

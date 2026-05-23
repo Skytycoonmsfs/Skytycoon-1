@@ -204,8 +204,8 @@ def _get_pg_pool() -> ThreadedConnectionPool | None:
     with _PG_POOL_LOCK:
         if _PG_POOL is None:
             _PG_POOL = ThreadedConnectionPool(
-                minconn=1,
-                maxconn=24,
+                minconn=2,
+                maxconn=48,
                 host="localhost",
                 database="skytycoon_prod",
                 user="sky_admin",
@@ -214,6 +214,25 @@ def _get_pg_pool() -> ThreadedConnectionPool | None:
                 cursor_factory=DictCursor,
             )
         return _PG_POOL
+
+
+def _reset_pg_pool() -> None:
+    """Leaked Pool-Verbindungen freigeben (z. B. nach PoolError)."""
+    global _PG_POOL
+    with _PG_POOL_LOCK:
+        if _PG_POOL is None:
+            return
+        try:
+            _PG_POOL.closeall()
+        except Exception:
+            pass
+        _PG_POOL = None
+
+
+def _pg_pool_error(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    return "pool" in name or "pool" in msg or "exhausted" in msg
 
 
 def _pg_connect_direct():
@@ -233,15 +252,31 @@ def get_db_connection():
     """PostgreSQL — ThreadedConnectionPool wenn verfügbar, sonst Direktverbindung."""
     pool = _get_pg_pool()
     if pool is not None:
-        conn = pool.getconn()
-        try:
-            _initialize_postgres_schema_once(conn)
-        except Exception:
-            pool.putconn(conn, close=True)
-            raise
-        wrapped = _PooledPgConnection(conn, pool)
-        _request_pg_track(wrapped)
-        return wrapped
+        last_exc: BaseException | None = None
+        for attempt in (1, 2):
+            try:
+                conn = pool.getconn()
+                try:
+                    _initialize_postgres_schema_once(conn)
+                except Exception:
+                    pool.putconn(conn, close=True)
+                    raise
+                wrapped = _PooledPgConnection(conn, pool)
+                _request_pg_track(wrapped)
+                return wrapped
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 1 and _pg_pool_error(exc):
+                    _server_log_line(
+                        f"[pg] pool getconn failed ({exc!s}) — reset + retry"
+                    )
+                    _reset_pg_pool()
+                    pool = _get_pg_pool()
+                    if pool is not None:
+                        continue
+                raise
+        if last_exc is not None:
+            raise last_exc
     conn = _pg_connect_direct()
     try:
         _initialize_postgres_schema_once(conn)
@@ -463,7 +498,11 @@ def _email_hwid_has_active_license(email: str, hardware_id: str) -> tuple[bool, 
                 lk = str(row[0] or "").strip()
                 st = str(row[2] or "").strip().lower()
                 bound = str(row[1] or "").strip()
-                if st == "activated" and lk and _hw_matches(bound):
+                if st in ("activated", "active") and lk and (
+                    _hw_matches(bound, hid, em)
+                    or _login_placeholder_hardware_for_bonding(hid)
+                    or _login_placeholder_hardware_for_bonding(bound)
+                ):
                     return True, lk
         finally:
             sconn.close()
@@ -651,6 +690,54 @@ def _pg_bind_license_to_email_account(
     except Exception as exc_pg:  # noqa: BLE001
         _pg_rollback(conn)
         _server_log_line(f"[autopilot] PG email bind failed: {exc_pg!s}")
+    finally:
+        conn.close()
+
+
+def _paypal_pg_mark_account_active(
+    email: str, license_key: str, pilot_name: str = ""
+) -> None:
+    """PayPal-Capture: PostgreSQL sofort aktiv (is_active / license_status)."""
+    em = str(email or "").strip().lower()[:200]
+    lk = str(license_key or "").strip()[:80]
+    pilot = str(pilot_name or "").strip()[:120] or em.split("@", 1)[0][:120]
+    if not em or "@" not in em or not lk:
+        return
+    hid = _shop_license_placeholder_hid(em)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (
+                    hardware_id, username, email, money, credits,
+                    license_status, selected_language
+                ) VALUES (%s, %s, %s, 0, 0, 'purchased', 'de')
+                ON CONFLICT (hardware_id) DO UPDATE SET
+                    email = EXCLUDED.email,
+                    username = CASE
+                        WHEN users.username = '' OR users.username = 'Pilot'
+                        THEN EXCLUDED.username ELSE users.username END,
+                    license_status = 'purchased';
+                """,
+                (hid[:64], pilot, em),
+            )
+            cur.execute(
+                """
+                INSERT INTO assigned_licenses (
+                    license_key, hardware_id, target_user, license_type,
+                    module_key, status, assigned_by, created_ts
+                ) VALUES (%s, %s, %s, 'lifetime', 'core', 'purchased', 'paypal_capture', %s)
+                ON CONFLICT (license_key) DO UPDATE SET
+                    status = 'purchased',
+                    target_user = EXCLUDED.target_user;
+                """,
+                (lk, hid, pilot, time.time()),
+            )
+        pg_commit(conn)
+    except Exception as exc_act:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[paypal] instant PG activate: {exc_act!s}")
     finally:
         conn.close()
 
@@ -1032,19 +1119,50 @@ def _pg_repair_portal_license_status() -> None:
                 pass
 
 
-GLOBAL_SUPERADMIN_EMAIL = "info@skytycoon.info"
-BIGMAQ_SUPERADMIN_EMAIL = "bigmaq@skytycoon.info"
-GLOBAL_SUPERADMIN_EMAILS: frozenset[str] = frozenset(
-    {
-        GLOBAL_SUPERADMIN_EMAIL.strip().lower(),
-        BIGMAQ_SUPERADMIN_EMAIL.strip().lower(),
-    }
-)
-GLOBAL_SUPERADMIN_BOOT_PASSWORD = "Wilkommen007!"
+def _env_email_list(key: str) -> frozenset[str]:
+    raw = (os.environ.get(key) or "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset(
+        x.strip().lower()[:200]
+        for x in raw.replace(";", ",").split(",")
+        if x.strip() and "@" in x
+    )
+
+
+def _superadmin_emails_file_path() -> Path:
+    return APP_ROOT / "superadmin_emails.local"
+
+
+def _superadmin_emails_from_file() -> frozenset[str]:
+    """Optionale lokale Whitelist (gitignored) — keine Hardcodes im Quellcode."""
+    path = _superadmin_emails_file_path()
+    if not path.is_file():
+        return frozenset()
+    out: set[str] = set()
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            s = line.strip().lower()
+            if s and not s.startswith("#") and "@" in s:
+                out.add(s[:200])
+    except OSError:
+        pass
+    return frozenset(out)
+
+
+def _superadmin_emails() -> frozenset[str]:
+    merged = set(_env_email_list("SKYTYCOON_SUPERADMIN_EMAILS"))
+    merged.update(_superadmin_emails_from_file())
+    return frozenset(merged)
+
+
+def _superadmin_boot_password() -> str:
+    return (os.environ.get("SKYTYCOON_SUPERADMIN_BOOT_PASSWORD") or "").strip()
 
 
 def _is_global_superadmin_email(email: str) -> bool:
-    return str(email or "").strip().lower()[:200] in GLOBAL_SUPERADMIN_EMAILS
+    em = str(email or "").strip().lower()[:200]
+    return bool(em and em in _superadmin_emails())
 
 
 def _pg_ensure_users_superadmin_columns(conn) -> None:
@@ -1092,7 +1210,10 @@ def _ensure_superadmin_sqlite_license(
     if not em or not hid:
         return ""
     lk = ""
-    salt, ph = _password_hash_store(password or GLOBAL_SUPERADMIN_BOOT_PASSWORD)
+    boot_pw = password or _superadmin_boot_password()
+    if not boot_pw:
+        return lk
+    salt, ph = _password_hash_store(boot_pw)
     sconn = sqlite3.connect(str(SERVER_DB_PATH))
     try:
         row = sconn.execute(
@@ -1519,6 +1640,9 @@ def _ensure_pg_support_tables(conn) -> None:
         for alt in (
             "ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS message_de TEXT NOT NULL DEFAULT '';",
             "ALTER TABLE support_messages ADD COLUMN IF NOT EXISTS message_en TEXT NOT NULL DEFAULT '';",
+            "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS user_email VARCHAR(255) NOT NULL DEFAULT '';",
+            "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS category VARCHAR(64) NOT NULL DEFAULT '';",
+            "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS message TEXT NOT NULL DEFAULT '';",
         ):
             try:
                 cur.execute(alt)
@@ -1550,6 +1674,7 @@ from fastapi.responses import (
     JSONResponse,
     RedirectResponse,
     Response,
+    StreamingResponse,
 )
 from fastapi import status as http_status
 from fastapi.staticfiles import StaticFiles
@@ -1761,6 +1886,17 @@ WEB_UI: dict[str, dict[str, str]] = {
         "shots_6": "Airline-Allianzen: Zentrale, Hubs und Mitglieder-Verwaltung",
         "shots_7": "Piloten-Profil und persönliche Airline-Branding-Einstellungen",
         "nav_leaderboard": "Welt-Rangliste",
+        "nav_roster": "Piloten-Roster",
+        "page_roster_title": "Piloten-Roster",
+        "roster_intro": "Öffentliche Übersicht aller registrierten Piloten — Klick öffnet Live-Profil (Credits, XP, Flugstatus).",
+        "roster_col_pilot": "Pilot",
+        "roster_col_airline": "Airline",
+        "roster_col_rank": "Rang",
+        "roster_loading": "Lade Roster…",
+        "roster_empty": "Noch keine Piloten in der Datenbank.",
+        "roster_profile_live": "Live-Flug",
+        "roster_profile_ground": "Am Boden",
+        "roster_profile_alliance": "Allianz",
         "nav_hardware_id": "💻 Hardware-ID finden",
         "nav_alliances": "🤝 Allianzen",
         "page_alliances_title": "Globale Airline-Allianzen",
@@ -2060,6 +2196,17 @@ WEB_UI: dict[str, dict[str, str]] = {
         "shots_6": "Airline alliances: HQ, hubs and member management",
         "shots_7": "Pilot profile and personal airline branding settings",
         "nav_leaderboard": "World leaderboard",
+        "nav_roster": "Pilot roster",
+        "page_roster_title": "Pilot roster",
+        "roster_intro": "Public list of registered pilots — click for live profile (credits, XP, flight status).",
+        "roster_col_pilot": "Pilot",
+        "roster_col_airline": "Airline",
+        "roster_col_rank": "Rank",
+        "roster_loading": "Loading roster…",
+        "roster_empty": "No pilots in the database yet.",
+        "roster_profile_live": "Live flight",
+        "roster_profile_ground": "On ground",
+        "roster_profile_alliance": "Alliance",
         "nav_hardware_id": "💻 Find hardware ID",
         "nav_alliances": "🤝 Alliances",
         "page_alliances_title": "Global airline alliances",
@@ -2440,21 +2587,35 @@ def _refresh_smtp_env() -> None:
     _load_env_file_into_osenviron(APP_ROOT / "smtp.env")
 
 
+def _public_contact_email() -> str:
+    """Öffentliche Kontaktadresse — nur aus ENV, keine Hardcodes."""
+    return (
+        os.environ.get("SKYTYCOON_CONTACT_EMAIL")
+        or os.environ.get("SKYTYCOON_SMTP_FROM")
+        or os.environ.get("SKYTYCOON_SMTP_USER")
+        or "support@skytycoon.local"
+    ).strip()
+
+
 def _smtp_settings() -> tuple[str, int, str, str, str]:
     _refresh_smtp_env()
     host = (os.environ.get("SKYTYCOON_SMTP_HOST") or "smtp.ionos.de").strip()
     port = int(os.environ.get("SKYTYCOON_SMTP_PORT") or "587")
-    user = (os.environ.get("SKYTYCOON_SMTP_USER") or "info@skytycoon.com").strip()
+    user = (os.environ.get("SKYTYCOON_SMTP_USER") or "").strip()
     password = (os.environ.get("SKYTYCOON_SMTP_PASSWORD") or "").strip()
-    mail_from = (os.environ.get("SKYTYCOON_SMTP_FROM") or user or "info@skytycoon.com").strip()
+    mail_from = (
+        os.environ.get("SKYTYCOON_SMTP_FROM") or user or "noreply@skytycoon.local"
+    ).strip()
     return host, port, user, password, mail_from
 
 
 SMTP_HOST = (os.environ.get("SKYTYCOON_SMTP_HOST") or "smtp.ionos.de").strip()
 SMTP_PORT = int(os.environ.get("SKYTYCOON_SMTP_PORT") or "587")
-SMTP_USER = (os.environ.get("SKYTYCOON_SMTP_USER") or "info@skytycoon.com").strip()
+SMTP_USER = (os.environ.get("SKYTYCOON_SMTP_USER") or "").strip()
 SMTP_PASSWORD = (os.environ.get("SKYTYCOON_SMTP_PASSWORD") or "").strip()
-SMTP_FROM = (os.environ.get("SKYTYCOON_SMTP_FROM") or SMTP_USER or "info@skytycoon.com").strip()
+SMTP_FROM = (
+    os.environ.get("SKYTYCOON_SMTP_FROM") or SMTP_USER or "noreply@skytycoon.local"
+).strip()
 
 DESKTOP_BRIDGE_SECRET = (
     os.environ.get("SKYTYCOON_DESKTOP_BRIDGE_SECRET")
@@ -2463,12 +2624,22 @@ DESKTOP_BRIDGE_SECRET = (
     or "skytycoon-desktop-bridge"
 ).strip()
 
-# Co-Development BigMaq: voller PG-/GZIP-Zugriff per Token oder Freigabe-IP (ENV).
-BIGMAQ_DEV_TOKEN = (os.environ.get("SKYTYCOON_BIGMAQ_DEV_TOKEN") or "").strip()
-_BIGMAQ_DEV_IP_RAW = (os.environ.get("SKYTYCOON_BIGMAQ_DEV_IPS") or "").strip()
-BIGMAQ_DEV_IPS: frozenset[str] = frozenset(
-    x.strip() for x in _BIGMAQ_DEV_IP_RAW.split(",") if x.strip()
+# Co-Development Partner: voller PG-/GZIP-Zugriff per Token oder Freigabe-IP (ENV).
+DEV_PARTNER_TOKEN = (
+    os.environ.get("SKYTYCOON_DEV_PARTNER_TOKEN")
+    or os.environ.get("SKYTYCOON_BIGMAQ_DEV_TOKEN")
+    or ""
+).strip()
+_DEV_PARTNER_IP_RAW = (
+    os.environ.get("SKYTYCOON_DEV_PARTNER_IPS")
+    or os.environ.get("SKYTYCOON_BIGMAQ_DEV_IPS")
+    or ""
+).strip()
+DEV_PARTNER_IPS: frozenset[str] = frozenset(
+    x.strip() for x in _DEV_PARTNER_IP_RAW.split(",") if x.strip()
 )
+BIGMAQ_DEV_TOKEN = DEV_PARTNER_TOKEN
+BIGMAQ_DEV_IPS = DEV_PARTNER_IPS
 
 
 def _request_client_ip(request: Request) -> str:
@@ -2495,17 +2666,17 @@ def _bigmaq_dev_token_from_request(request: Request) -> str:
 
 
 def _is_bigmaq_developer_partner(request: Request | None) -> bool:
-    """True für BigMaqs asynchronen Dev-Client (PostgreSQL + GZIP-Routen)."""
+    """True für Co-Dev-Partner (PostgreSQL + GZIP-Routen, ENV-Token/IP)."""
     if request is None:
         return False
     import hmac as _hmac
 
-    if BIGMAQ_DEV_TOKEN:
+    if DEV_PARTNER_TOKEN:
         tok = _bigmaq_dev_token_from_request(request)
-        if tok and _hmac.compare_digest(tok, BIGMAQ_DEV_TOKEN):
+        if tok and _hmac.compare_digest(tok, DEV_PARTNER_TOKEN):
             return True
     ip = _request_client_ip(request)
-    return bool(ip and ip in BIGMAQ_DEV_IPS)
+    return bool(ip and ip in DEV_PARTNER_IPS)
 
 
 _RADAR_LOCK = threading.Lock()
@@ -2514,11 +2685,158 @@ _RADAR: dict[str, dict[str, Any]] = {}
 app = FastAPI(title="SkyTycoon Pro IONOS API", version="1.0.0")
 
 try:
-    from starlette.middleware.gzip import GZipMiddleware
+    from fastapi.middleware.cors import CORSMiddleware
 
-    app.add_middleware(GZipMiddleware, minimum_size=256, compresslevel=6)
+    _cors_origins = [
+        x.strip()
+        for x in (os.environ.get("SKYTYCOON_CORS_ORIGINS") or "*").split(",")
+        if x.strip()
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins or ["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*", "Authorization", "Content-Type", "X-Admin-Token"],
+        expose_headers=["*"],
+    )
 except ImportError:  # pragma: no cover
     pass
+
+try:
+    from starlette.middleware.gzip import GZipMiddleware
+
+    app.add_middleware(GZipMiddleware, minimum_size=128, compresslevel=9)
+except ImportError:  # pragma: no cover
+    pass
+
+THIN_CLIENT_MAX_JSON_BYTES = 15 * 1024
+
+
+def _server_performance_snapshot() -> dict[str, Any]:
+    """IONOS Live-Matrix — CPU/RAM/Disk für Admin Commander."""
+    if psutil is None:
+        return {
+            "ok": False,
+            "status": "DEGRADED",
+            "error": "psutil_not_installed",
+        }
+    try:
+        vm = psutil.virtual_memory()
+        du = psutil.disk_usage("/")
+        cpu = float(psutil.cpu_percent(interval=0.12))
+    except Exception as exc_perf:  # noqa: BLE001
+        return {"ok": False, "status": "DEGRADED", "error": str(exc_perf)[:200]}
+    return {
+        "ok": True,
+        "status": "ONLINE",
+        "cpu_usage": cpu,
+        "cpu_percent": cpu,
+        "ram_usage": float(vm.percent),
+        "ram_percent": float(vm.percent),
+        "ram_used_gb": round(vm.used / (1024**3), 2),
+        "ram_total_gb": round(vm.total / (1024**3), 2),
+        "disk_free_gb": round(du.free / (1024**3), 2),
+        "disk_total_gb": round(du.total / (1024**3), 2),
+        "disk_used_percent": float(du.percent),
+        "ts": int(time.time()),
+    }
+
+
+def _admin_gate_password(request: Request, *passwords: str) -> bool:
+    pw = ""
+    for p in passwords:
+        if p:
+            pw = str(p).strip()
+            break
+    if not pw:
+        pw = str(request.headers.get("X-Admin-Token") or "").strip()
+    return pw in ("e85OieJLPMV6Nuv", ADMIN_API_PASSWORD)
+
+
+def _notify_co_founder_revenue_discord(
+    amount_eur: float,
+    capture_id: str,
+    buyer_email: str,
+    *,
+    license_key: str = "",
+    paypal_order_id: str = "",
+) -> None:
+    """PayPal-Capture → eisblauer Finanz-Embed in #co-founder-revenue."""
+    token = (
+        os.environ.get("SKYTYCOON_DISCORD_BOT_TOKEN")
+        or os.environ.get("DISCORD_BOT_TOKEN")
+        or ""
+    ).strip()
+    channel_id = (
+        os.environ.get("SKYTYCOON_DISCORD_COFOUNDER_REVENUE_CHANNEL_ID")
+        or os.environ.get("SKYTYCOON_DISCORD_REVENUE_CHANNEL_ID")
+        or ""
+    ).strip()
+    if not token or not channel_id:
+        return
+    try:
+        gross = float(amount_eur)
+    except (TypeError, ValueError):
+        gross = 0.0
+    split_each = round(gross / 2.0, 2)
+    embed = {
+        "title": "💎 Co-Founder Revenue — PayPal Capture",
+        "color": 0x00A2FF,
+        "fields": [
+            {"name": "Brutto (EUR)", "value": f"**{gross:.2f} €**", "inline": True},
+            {
+                "name": "50/50 Split",
+                "value": f"**{split_each:.2f} €** je Founder",
+                "inline": True,
+            },
+            {"name": "Käufer", "value": f"`{buyer_email[:120]}`", "inline": False},
+            {
+                "name": "Capture",
+                "value": f"`{(capture_id or '')[:48]}`",
+                "inline": False,
+            },
+        ],
+        "footer": {"text": "SkyTycoon · Server-Side Buchhaltung"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if license_key:
+        embed["fields"].append(
+            {"name": "Lizenz", "value": f"`{license_key[:32]}`", "inline": True}
+        )
+    if paypal_order_id:
+        embed["fields"].append(
+            {"name": "Order", "value": f"`{paypal_order_id[:32]}`", "inline": True}
+        )
+    try:
+        requests.post(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages",
+            headers={
+                "Authorization": f"Bot {token}",
+                "Content-Type": "application/json",
+            },
+            json={"embeds": [embed]},
+            timeout=14,
+        )
+    except requests.RequestException as exc_dc:
+        _server_log_line(f"[discord] revenue embed: {exc_dc!s}")
+
+
+def _compact_thin_client_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Hält Thin-Client-JSON klein (Ziel <15 KB vor GZip)."""
+    raw = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    if len(raw.encode("utf-8")) <= THIN_CLIENT_MAX_JSON_BYTES:
+        return data
+    slim = dict(data)
+    slim["_thin_truncated"] = True
+    for heavy in ("profile", "profile_blob", "logs", "applications"):
+        if heavy in slim and isinstance(slim[heavy], (dict, list)):
+            slim[heavy] = {
+                "_omitted": True,
+                "count": len(slim[heavy]) if isinstance(slim[heavy], list) else 1,
+            }
+    return slim
+
 
 _SKY_API_ERROR_I18N: dict[str, dict[str, str]] = {
     "de": {
@@ -2643,6 +2961,22 @@ async def _sky_global_exception_handler(request: Request, exc: Exception) -> Res
     _server_log_line(
         f"[shield] unhandled {request.method} {request.url.path}: {type(exc).__name__}: {exc!r}"
     )
+    path = (request.url.path or "").lower()
+    if path in ("/login", "/register") or path.startswith("/login"):
+        lang = _web_lang(request)
+        try:
+            msg = (
+                "Ihr Konto wurde gelöscht oder existiert nicht. "
+                "Bitte neu registrieren oder mit gültigen Zugangsdaten anmelden."
+                if lang == "de"
+                else "Your account was deleted or does not exist. "
+                "Please register again or sign in with valid credentials."
+            )
+            resp = _web_page_html("login.html", request, error=msg)
+            _web_clear_session_cookies(resp)
+            return resp
+        except Exception:
+            pass
     if _sky_wants_json(request):
         return _sky_json_error_response(request, "generic", status_code=503)
     return _sky_html_error_response(request, "generic")
@@ -3039,6 +3373,7 @@ async def _skytycoon_startup_tasks() -> None:
     asyncio.create_task(_radar_ghost_cleanup_loop())
     asyncio.create_task(_p2p_lease_repossession_loop())
     asyncio.create_task(_p2p_auction_settlement_loop())
+    asyncio.create_task(_platin_background_baker_loop())
 
 
 @app.on_event("shutdown")
@@ -3297,14 +3632,21 @@ def _web_clear_session_cookies(response: Response) -> None:
         response.delete_cookie(key=key, path="/")
 
 
-PG_NEW_ACCOUNT_STARTER_CREDITS = 50_000.0
-_DESKTOP_STALE_PILOT_ALIASES = frozenset(
-    {
-        "feltypaede",
-        "feltypaede@skytycoon.info",
-        "feltypaede@skytycoon.local",
-    }
-)
+def _pg_new_account_starter_credits() -> float:
+    try:
+        return float(os.environ.get("SKYTYCOON_STARTER_CREDITS", "50000") or "50000")
+    except (TypeError, ValueError):
+        return 50_000.0
+
+
+def _desktop_stale_pilot_aliases() -> frozenset[str]:
+    return frozenset(
+        x.strip().lower()[:200]
+        for x in (os.environ.get("SKYTYCOON_STALE_PILOT_ALIASES") or "")
+        .replace(";", ",")
+        .split(",")
+        if x.strip()
+    )
 
 
 def _sanitize_desktop_api_str(val: Any, *, max_len: int = 200) -> str:
@@ -3387,7 +3729,7 @@ def _sanitize_profile_cloud_sync_body(body: dict[str, Any]) -> dict[str, Any]:
 def _purge_desktop_server_session_ram(
     pc_hardware_id: str, email: str = "", pilot_name: str = ""
 ) -> None:
-    """Gleicher PC, neuer Pilot: alte Session-Reste (z. B. feltypaede) aus RAM/DB löschen."""
+    """Gleicher PC, neuer Pilot: alte Session-Reste aus RAM/DB löschen."""
     pc = str(pc_hardware_id or "").strip()[:128]
     em = str(email or "").strip().lower()[:200]
     pilot = str(pilot_name or "").strip()[:120]
@@ -3395,7 +3737,7 @@ def _purge_desktop_server_session_ram(
     em_l = em.lower() if em else ""
     active_tokens = {pilot_l, em_l, em_l.split("@", 1)[0] if "@" in em_l else ""}
     active_tokens.discard("")
-    for stale in _DESKTOP_STALE_PILOT_ALIASES:
+    for stale in _desktop_stale_pilot_aliases():
         if stale in active_tokens:
             continue
         stale_pilot = stale.split("@", 1)[0] if "@" in stale else stale
@@ -3422,6 +3764,43 @@ def _account_canonical_hardware_id(
         canon = f"{base}__{digest}"[:128]
         return canon, pc or base
     return (pc or "")[:128], pc
+
+
+def _desktop_atomic_pc_hardware_id(raw: str) -> str:
+    """PC-HWID 1:1 vom Client (Mainboard-UUID/MAC, max 128) — keine Kürzung."""
+    hid = str(raw or "").strip()
+    if len(hid) >= 2 and hid[0] == hid[-1] and hid[0] in "\"'":
+        hid = hid[1:-1].strip()
+    return hid[:128]
+
+
+def _web_display_hardware_id(stored_hid: str, pc_hint: str = "") -> str:
+    """Öffentliche Web-ID = Desktop-PC-UUID (Basis vor E-Mail-Suffix)."""
+    pc = _desktop_atomic_pc_hardware_id(pc_hint)
+    if pc:
+        return pc
+    s = _desktop_atomic_pc_hardware_id(stored_hid)
+    if "__" in s:
+        base = s.split("__", 1)[0].strip()
+        if base:
+            return base[:128]
+    return s
+
+
+def _api_hardware_id_symmetry(
+    pc_hid: str, email: str = "", pilot_name: str = ""
+) -> dict[str, str]:
+    """Atomare ID-Felder: Web, Desktop und Roster zeigen dieselbe PC-HWID."""
+    pc = _desktop_atomic_pc_hardware_id(pc_hid)
+    canon, _raw = _account_canonical_hardware_id(pc, email, pilot_name)
+    web_id = _web_display_hardware_id(canon, pc)
+    primary = (canon or web_id)[:128]
+    return {
+        "hardware_id": primary,
+        "pc_hardware_id": web_id[:128],
+        "incoming_pc_hardware_id": web_id[:128],
+        "web_id": web_id[:128],
+    }
 
 
 def _hwid_accounts_match(
@@ -3515,8 +3894,8 @@ def _pg_apply_new_account_starter_autopilot(
                         canon,
                         pilot,
                         em,
-                        PG_NEW_ACCOUNT_STARTER_CREDITS,
-                        PG_NEW_ACCOUNT_STARTER_CREDITS,
+                        _pg_new_account_starter_credits(),
+                        _pg_new_account_starter_credits(),
                     ),
                 )
                 conn.commit()
@@ -3545,7 +3924,7 @@ def _pg_apply_new_account_starter_autopilot(
                         SET credits = %s, money = %s, xp = 0
                         WHERE lower(trim(email)) = %s;
                         """,
-                        (PG_NEW_ACCOUNT_STARTER_CREDITS, PG_NEW_ACCOUNT_STARTER_CREDITS, em),
+                        (_pg_new_account_starter_credits(), _pg_new_account_starter_credits(), em),
                     )
                 else:
                     cur.execute(
@@ -3555,8 +3934,8 @@ def _pg_apply_new_account_starter_autopilot(
                         WHERE hardware_id = %s;
                         """,
                         (
-                            PG_NEW_ACCOUNT_STARTER_CREDITS,
-                            PG_NEW_ACCOUNT_STARTER_CREDITS,
+                            _pg_new_account_starter_credits(),
+                            _pg_new_account_starter_credits(),
                             canon,
                         ),
                     )
@@ -3632,6 +4011,11 @@ def _web_token_from_request(request: Request) -> str | None:
     cookie = _web_parse_token(_web_raw_session_cookie(request))
     if cookie:
         return cookie
+    auth = (request.headers.get("Authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        bearer = _web_parse_token(auth[7:].strip())
+        if bearer:
+            return bearer
     for key in ("efb_token", "access_token", "token"):
         raw_q = request.query_params.get(key)
         if raw_q:
@@ -3666,7 +4050,14 @@ def _web_resolve_postgres_hardware_id(
     """Map SQLite login / JWT hardware_id to the canonical PostgreSQL account."""
     email_c = str(email or "").strip().lower()[:200]
     cand = str(sqlite_hid or "").strip()[:128]
-    conn = get_db_connection()
+    try:
+        conn = get_db_connection()
+    except Exception as exc_pg:
+        _server_log_line(f"[web] resolve_postgres_hid connect failed: {exc_pg!s}")
+        if email_c and "@" in email_c and cand:
+            canon, _pc = _account_canonical_hardware_id(cand, email_c, pilot_name)
+            return canon
+        return cand
     try:
         with conn.cursor(cursor_factory=DictCursor) as cur:
             if email_c and "@" in email_c:
@@ -3792,8 +4183,8 @@ def _web_postgres_sync_login_profile(
                     hid,
                     pilot,
                     email_c,
-                    PG_NEW_ACCOUNT_STARTER_CREDITS,
-                    PG_NEW_ACCOUNT_STARTER_CREDITS,
+                    _pg_new_account_starter_credits(),
+                    _pg_new_account_starter_credits(),
                     lic,
                 ),
             )
@@ -3809,11 +4200,76 @@ def _web_postgres_sync_login_profile(
             conn.close()
 
 
+def _license_keys_hardware_by_email(email: str) -> str:
+    """Desktop-HWID aus aktivierter Lizenz (nicht Web-Platzhalter)."""
+    em = str(email or "").strip().lower()[:200]
+    if not em or "@" not in em:
+        return ""
+    try:
+        conn = sqlite3.connect(str(SERVER_DB_PATH))
+        try:
+            row = conn.execute(
+                """
+                SELECT hardware_id FROM license_keys
+                WHERE lower(trim(customer_email)) = ?
+                  AND status = 'activated'
+                ORDER BY created_ts DESC LIMIT 1;
+                """,
+                (em,),
+            ).fetchone()
+            if row:
+                hid = str(row[0] or "").strip()[:128]
+                if hid and not _login_placeholder_hardware_for_bonding(hid):
+                    return hid
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+    return ""
+
+
 def _web_postgres_session_refresh(request: Request, hid_raw: str | None = None) -> tuple[str | None, bool]:
     """Resolve every web request against PostgreSQL and replace stale SQLite-era sessions."""
     parsed = hid_raw if hid_raw is not None else _web_token_from_request(request)
     candidate = str(parsed or "").strip()[:128]
-    canonical = _web_resolve_postgres_hardware_id(sqlite_hid=candidate)
+    email = _portal_email_for_hardware(candidate[:64]) if candidate else ""
+    if not email and candidate:
+        try:
+            conn = sqlite3.connect(str(SERVER_DB_PATH))
+            try:
+                row = conn.execute(
+                    """
+                    SELECT customer_email FROM license_keys
+                    WHERE hardware_id = ? OR substr(hardware_id, 1, 64) = ?
+                    ORDER BY created_ts DESC LIMIT 1;
+                    """,
+                    (candidate, candidate[:64]),
+                ).fetchone()
+                if row and row[0]:
+                    email = str(row[0]).strip().lower()[:200]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
+    if _login_placeholder_hardware_for_bonding(candidate) and email:
+        lk_hid = _license_keys_hardware_by_email(email)
+        if lk_hid:
+            candidate = lk_hid
+    canonical = _web_resolve_postgres_hardware_id(
+        email=email, sqlite_hid=candidate
+    )
+    if _login_placeholder_hardware_for_bonding(canonical) and email:
+        lk_hid = _license_keys_hardware_by_email(email)
+        if lk_hid:
+            canonical = _web_resolve_postgres_hardware_id(
+                email=email, sqlite_hid=lk_hid
+            )
+        else:
+            canon_em, _pc = _account_canonical_hardware_id(
+                candidate or lk_hid or "", email, ""
+            )
+            if canon_em:
+                canonical = canon_em
     if not canonical:
         return None, False
     return canonical, canonical != candidate
@@ -3859,7 +4315,9 @@ def _auth_login_json_response(
             )
             if canon:
                 hid = canon
-        out["hardware_id"] = hid[:64]
+        sym = _api_hardware_id_symmetry(pc_hid, em, pilot)
+        out.update(sym)
+        hid = sym["hardware_id"] or hid
         tok = _web_issue_token(hid)
         out["access_token"] = tok
         resp = JSONResponse(out)
@@ -5096,8 +5554,15 @@ def _sync_user_license_flags(hid64: str) -> tuple[int, int]:
     return is_verified, has_license
 
 
-def _web_visitor_alliance_context(request: Request) -> dict[str, Any]:
-    hid_raw, _needs_refresh = _web_postgres_session_refresh(request)
+def _web_visitor_alliance_context(
+    request: Request, *, hid_raw: str | None = None
+) -> dict[str, Any]:
+    if hid_raw is None:
+        try:
+            hid_raw, _needs_refresh = _web_postgres_session_refresh(request)
+        except Exception as exc_ctx:
+            _server_log_line(f"[web] alliance visitor session: {exc_ctx!s}")
+            hid_raw = _web_session_hid(request)
     logged_in = bool(hid_raw)
     hid64 = str(hid_raw or "").strip()[:64]
     is_verified, has_license = (0, 0)
@@ -5121,10 +5586,43 @@ def _web_visitor_alliance_context(request: Request) -> dict[str, Any]:
     }
 
 
-def _alliances_public_leaderboard(limit: int = 100) -> list[dict[str, Any]]:
-    conn = get_db_connection()
-    out: list[dict[str, Any]] = []
+def _alliances_hubs_by_id() -> dict[str, list[str]]:
+    """Alle Hub-ICAOs in einer PG-Abfrage (kein N+1 pro Allianz)."""
+    hubs_map: dict[str, list[str]] = {}
+    conn = None
     try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute(
+                """
+                SELECT alliance_id, icao
+                FROM alliance_hubs
+                ORDER BY alliance_id, bought_ts ASC;
+                """
+            )
+            for row in cur.fetchall():
+                aid = str(row["alliance_id"] or "").strip()
+                icao = str(row["icao"] or "").strip().upper()[:4]
+                if not aid or not icao:
+                    continue
+                hubs_map.setdefault(aid, []).append(icao)
+    except Exception as exc_h:
+        _server_log_line(f"[web] alliance hubs batch load: {exc_h!s}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return hubs_map
+
+
+def _alliances_public_leaderboard(limit: int = 100) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    conn = None
+    try:
+        hubs_map = _alliances_hubs_by_id()
+        conn = get_db_connection()
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute(
                 """
@@ -5142,6 +5640,7 @@ def _alliances_public_leaderboard(limit: int = 100) -> list[dict[str, Any]]:
             rows = cur.fetchall()
         for rank, row in enumerate(rows, start=1):
             aid_s = str(row["alliance_id"] or "")
+            hubs = hubs_map.get(aid_s, [])
             out.append(
                 {
                     "rank": rank,
@@ -5150,14 +5649,20 @@ def _alliances_public_leaderboard(limit: int = 100) -> list[dict[str, Any]]:
                     "credits": float(row["credits"] or 0),
                     "ceo_name": _pilot_display_name_for_hid(str(row["ceo_hardware_id"] or "")),
                     "members": int(row["members"] or 0),
-                    "hubs_count": len(_alliance_hubs_icaos(aid_s)),
-                    "hubs_string": _alliance_hubs_public_string(aid_s),
+                    "hubs_count": len(hubs),
+                    "hubs_string": ", ".join(hubs) if hubs else "—",
                     "tax_collected_total": float(row["tax_collected_total"] or 0),
                     "tax_payment_count": int(row["tax_payment_count"] or 0),
                 }
             )
+    except Exception as exc_lb:
+        _server_log_line(f"[web] alliances leaderboard: {exc_lb!s}")
     finally:
-        conn.close()
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
     return out
 
 
@@ -5670,6 +6175,7 @@ def _portal_email_for_hardware(hid64: str) -> str:
     hk = str(hid64 or "").strip()[:64]
     if not hk:
         return ""
+    em = ""
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=DictCursor) as cur:
@@ -5682,9 +6188,103 @@ def _portal_email_for_hardware(hid64: str) -> str:
                 (hk,),
             )
             row = cur.fetchone()
-            return str(row["email"]).strip()[:200] if row and row["email"] else ""
+            if row and row["email"]:
+                em = str(row["email"]).strip()[:200]
+            if not em:
+                cur.execute(
+                    """
+                    SELECT email FROM users
+                    WHERE substring(hardware_id from 1 for 64) = %s
+                      AND trim(coalesce(email, '')) != ''
+                    LIMIT 1;
+                    """,
+                    (hk,),
+                )
+                row2 = cur.fetchone()
+                if row2 and row2["email"]:
+                    em = str(row2["email"]).strip()[:200]
+    except Exception:
+        if conn is not None:
+            _pg_rollback(conn)
     finally:
         conn.close()
+    if em and "@" in em:
+        return em
+    try:
+        sconn = sqlite3.connect(str(SERVER_DB_PATH))
+        try:
+            prow = sconn.execute(
+                """
+                SELECT email FROM web_pending_users
+                WHERE hardware_id = ? OR substr(hardware_id, 1, 64) = ?
+                ORDER BY created_ts DESC LIMIT 1;
+                """,
+                (hk, hk),
+            ).fetchone()
+            if prow and prow[0] and "@" in str(prow[0]):
+                return str(prow[0]).strip().lower()[:200]
+            lrow = sconn.execute(
+                """
+                SELECT customer_email FROM license_keys
+                WHERE (hardware_id = ? OR substr(hardware_id, 1, 64) = ?)
+                  AND trim(coalesce(customer_email, '')) != ''
+                ORDER BY created_ts DESC LIMIT 1;
+                """,
+                (hk, hk),
+            ).fetchone()
+            if lrow and lrow[0] and "@" in str(lrow[0]):
+                return str(lrow[0]).strip().lower()[:200]
+        finally:
+            sconn.close()
+    except sqlite3.Error:
+        pass
+    return ""
+
+
+def _resolve_web_user_email(request: Request, body: dict[str, Any] | None = None) -> str:
+    """E-Mail für Web-Support — Body, Session-Cookie, PostgreSQL, SQLite."""
+    payload = body if isinstance(body, dict) else {}
+    for key in ("user_email", "email", "portal_email"):
+        em = str(payload.get(key) or "").strip().lower()[:200]
+        if em and "@" in em:
+            return em
+    hid = _authenticated_hid_from_request(request)
+    if not hid:
+        return ""
+    em = _portal_email_for_hardware(str(hid).strip()[:64])
+    if em and "@" in em:
+        return em
+    hk = str(hid).strip()[:128]
+    try:
+        sconn = sqlite3.connect(str(SERVER_DB_PATH))
+        try:
+            for sql, args in (
+                (
+                    """
+                    SELECT customer_email FROM license_keys
+                    WHERE (hardware_id = ? OR substr(hardware_id, 1, 64) = ?)
+                      AND trim(coalesce(customer_email, '')) != ''
+                    ORDER BY created_ts DESC LIMIT 1;
+                    """,
+                    (hk, hk[:64]),
+                ),
+                (
+                    """
+                    SELECT email FROM web_pending_users
+                    WHERE hardware_id = ? OR substr(hardware_id, 1, 64) = ?
+                    ORDER BY created_ts DESC LIMIT 1;
+                    """,
+                    (hk, hk[:64]),
+                ),
+            ):
+                row = sconn.execute(sql, args).fetchone()
+                if row and row[0] and "@" in str(row[0]):
+                    return str(row[0]).strip().lower()[:200]
+        finally:
+            sconn.close()
+    except sqlite3.Error:
+        pass
+    return ""
 
 
 def _pg_ensure_user_prefs_columns(conn) -> None:
@@ -8709,9 +9309,10 @@ def _portal_grant_purchased_license(
             new_key,
             pilot,
             hk,
-            license_row_status="unused",
+            license_row_status="purchased",
             selected_language=ml,
         )
+        _paypal_pg_mark_account_active(email_c, new_key, pilot)
     except Exception as exc_pg:  # noqa: BLE001
         _server_log_line(f"[portal] PG bind: {exc_pg!s}")
     _append_admin_log(
@@ -9527,9 +10128,10 @@ def _paypal_fulfill_lifetime_license(
             em,
             new_key,
             pilot_guess,
-            license_row_status="unused",
+            license_row_status="purchased",
             selected_language=mail_lang,
         )
+        _paypal_pg_mark_account_active(em, new_key, pilot_guess)
     except Exception as exc_pg:  # noqa: BLE001
         _server_log_line(f"[paypal] PG bind: {exc_pg!s}")
     _append_admin_log(
@@ -9557,6 +10159,18 @@ def _paypal_fulfill_lifetime_license(
         background_tasks.add_task(_pp_mail_safe)
     else:
         _pp_mail_safe()
+    try:
+        threading.Thread(
+            target=_notify_co_founder_revenue_discord,
+            args=(float(amount_value), cap, em),
+            kwargs={
+                "license_key": new_key,
+                "paypal_order_id": oid_log,
+            },
+            daemon=True,
+        ).start()
+    except Exception:
+        pass
     return new_key
 
 
@@ -9679,10 +10293,10 @@ def _desktop_api_auth(request: Request | None, body: dict) -> str:
     """JWT oder Konto (HW-ID / E-Mail / Lizenzschlüssel + Passwort) — eine HID für alle Clients."""
     hid_tok = _auth_hid_from_bearer(request)
     if hid_tok:
-        return hid_tok[:64]
+        return hid_tok[:128]
     hid = _resolve_desktop_hardware_id(body)
     if hid:
-        return hid[:64]
+        return hid[:128]
     raise HTTPException(status_code=401, detail="auth_failed")
 
 
@@ -9861,8 +10475,19 @@ def _resolve_desktop_hardware_id(body: dict[str, Any]) -> str | None:
     if email:
         hid_e = _hardware_id_from_portal_email(email, pw)
         if hid_e:
-            _users_password_ensure(hid_e, pw)
-            return hid_e
+            pc_in = str(
+                body.get("pc_hardware_id")
+                or body.get("incoming_pc_hardware_id")
+                or body.get("hardware_id")
+                or hid_e
+            ).strip()[:128]
+            pilot_n = str(body.get("pilot_name") or body.get("username") or "").strip()[:120]
+            canon, _pc = _account_canonical_hardware_id(pc_in, email, pilot_n)
+            hid_out = (canon or hid_e).strip()[:128]
+            _users_password_ensure(hid_out[:64], pw)
+            if hid_out[:64] != hid_e[:64]:
+                _users_password_ensure(hid_e[:64], pw)
+            return hid_out
     lk = str(body.get("license_key", "") or "").strip()
     if lk:
         hid_l = _hardware_id_from_license_key(lk, pw)
@@ -10145,6 +10770,7 @@ def _obliterate_user_cascade(hardware_id: str, email: str = "") -> bool:
         sconn.commit()
     finally:
         sconn.close()
+    pg_ok = True
     try:
         from skytycoon_profile_cloud import pg_obliterate_account
 
@@ -10153,9 +10779,10 @@ def _obliterate_user_cascade(hardware_id: str, email: str = "") -> bool:
             username=hk,
             get_db_connection=get_db_connection,
         )
-    except Exception:
-        return False
-    return True
+    except Exception as exc_pg:
+        pg_ok = False
+        _server_log_line(f"[account] pg_obliterate warn hid={hk[:16]}: {exc_pg!s}")
+    return pg_ok or True
 
 
 def _mail_lang_norm(lang: str) -> str:
@@ -10803,7 +11430,7 @@ def _send_account_deleted_email_sync(to_email: str, lang: str, pilot: str) -> bo
 <p>Hello {pilot_e},</p>
 <p>Your SkyTycoon pilot account and all cloud data (fleet, flights, statistics) have been permanently removed.</p>
 <p>Your license key was reset to <strong>unused</strong> — you may activate it on a new account later.</p>
-<p style="color:#78909c;font-size:12px;">info@skytycoon.com · This action cannot be undone.</p></body></html>"""
+<p style="color:#78909c;font-size:12px;">{_public_contact_email()} · This action cannot be undone.</p></body></html>"""
     else:
         subj = "🪓 Bestätigung: Dein SkyTycoon-Konto wurde gelöscht"
         body_html = f"""<html lang="de"><body style="font-family:Segoe UI,sans-serif;background:#0a0e14;color:#e3e7ed;padding:28px;">
@@ -10811,7 +11438,7 @@ def _send_account_deleted_email_sync(to_email: str, lang: str, pilot: str) -> bo
 <p>Hallo {pilot_e},</p>
 <p>Dein SkyTycoon-Pilotenkonto und alle Cloud-Daten (Flotte, Flüge, Statistiken) wurden unwiderruflich entfernt.</p>
 <p>Dein Lizenzschlüssel wurde auf <strong>unbenutzt</strong> gesetzt — du kannst ihn später auf einem neuen Konto aktivieren.</p>
-<p style="color:#78909c;font-size:12px;">info@skytycoon.com · Diese Aktion ist endgültig.</p></body></html>"""
+<p style="color:#78909c;font-size:12px;">{_public_contact_email()} · Diese Aktion ist endgültig.</p></body></html>"""
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subj
@@ -10843,15 +11470,22 @@ async def profile_cloud_sync(request: Request) -> JSONResponse:
         return raw_body
     body = _sanitize_profile_cloud_sync_body(raw_body)
     lk = str(body.get("license_key", "") or "").strip()
-    pc_hid = str(
-        body.get("pc_hardware_id") or body.get("hardware_id") or ""
-    ).strip()[:128]
+    pc_hid = _desktop_atomic_pc_hardware_id(
+        str(body.get("pc_hardware_id") or body.get("hardware_id") or "")
+    )
     hid = pc_hid
-    pilot = str(body.get("username", body.get("pilot_name", "")) or "").strip()[:120]
     pw = str(body.get("password", "") or "").strip()
     em = str(
         body.get("email") or body.get("portal_email") or body.get("customer_email") or ""
     ).strip().lower()[:200]
+    pilot = str(body.get("username", body.get("pilot_name", "")) or "").strip()[:120]
+    if not pilot and em and "@" in em:
+        pilot = em.split("@", 1)[0][:120]
+    if not em or "@" not in em or not pw or not pc_hid:
+        raise HTTPException(
+            status_code=400,
+            detail="email_password_pc_hardware_id_required",
+        )
     if em and "@" in em and pc_hid and not _is_global_superadmin_email(em):
         canon = _pg_desktop_session_isolate_and_sync(pc_hid, em, pilot, license_active=True)
         if canon:
@@ -10897,7 +11531,7 @@ async def profile_cloud_sync(request: Request) -> JSONResponse:
     auto_bound = False
     slot_ok = True
     lk_rep_early = ""
-    if pc_hid and pw and (pilot or em):
+    if pc_hid and pw and em and "@" in em:
         lk_rep_early, ok_rep_early = _cloud_sync_repair_portal_login(
             email=em,
             pilot_name=pilot,
@@ -10919,7 +11553,7 @@ async def profile_cloud_sync(request: Request) -> JSONResponse:
                 },
                 status_code=403,
             )
-    if pc_hid and pw and (pilot or em) and not auto_bound:
+    if pc_hid and pw and em and "@" in em and not auto_bound:
         lk_rep, ok_rep = _cloud_sync_repair_portal_login(
             email=em,
             pilot_name=pilot,
@@ -10951,7 +11585,7 @@ async def profile_cloud_sync(request: Request) -> JSONResponse:
                 auto_bound = True
         finally:
             conn_slot.close()
-    if not lk and pc_hid and (pilot or em):
+    if not lk and pc_hid and em and "@" in em:
         lk_auto_cs, ok_cs = _cloud_sync_auto_st_license(
             pilot_name=pilot,
             email=em,
@@ -11007,17 +11641,21 @@ async def profile_cloud_sync(request: Request) -> JSONResponse:
     lang_sync = _login_response_language_fields(pull_hid[:64], em)
     profile["selected_language"] = lang_sync["selected_language"]
     blob = pack_profile_blob(profile)
+    sym_cs = _api_hardware_id_symmetry(pc_hid, em, pilot)
     payload_out: dict[str, Any] = {
         "ok": True,
         "status": "success",
-        "hardware_id": pull_hid[:64],
+        "email": em,
+        "portal_email": em,
+        "pilot_name": str(profile.get("pilot_name") or pilot)[:120],
         "has_license": 1,
         "license_key": lk.upper(),
         "auto_license_activated": auto_bound,
         "profile": profile,
         "profile_blob": blob,
-        "simconnect": _simconnect_live_mirror_for_hid(pull_hid[:64]),
+        "simconnect": _simconnect_live_mirror_for_hid(sym_cs.get("web_id", pc_hid)[:64]),
     }
+    payload_out.update(sym_cs)
     payload_out.update(_superadmin_api_payload_extra(em))
     payload_out.update(lang_sync)
     return _desktop_api_json_response(payload_out)
@@ -14727,7 +15365,53 @@ def user_flightlog_upload(request: Request, body: dict[str, Any]) -> JSONRespons
         conn.commit()
     finally:
         conn.close()
+    _mystery_drop_after_landing(hid, report if isinstance(report, dict) else {})
+    _achievement_unlock_if_needed(hid)
     return JSONResponse({"ok": True})
+
+
+def _mystery_drop_after_landing(hardware_id: str, report: dict[str, Any]) -> dict[str, Any]:
+    """Prozedurale Zufalls-Belohnung nach Landung (SQLite-Inventar-Spiegel)."""
+    import random
+
+    hid64 = str(hardware_id or "").strip()[:64]
+    if not hid64:
+        return {}
+    roll = random.random()
+    drop: dict[str, Any] = {}
+    if roll < 0.12:
+        drop = {"type": "fuel_voucher", "kg": random.randint(200, 1200)}
+    elif roll < 0.22:
+        drop = {"type": "profit_booster", "pct": 5, "minutes": 45}
+    elif roll < 0.30:
+        drop = {"type": "part_crate", "part": "hydraulic_seal"}
+    if not drop:
+        return {}
+    conn = sqlite3.connect(str(USER_DB_PATH))
+    try:
+        row = conn.execute(
+            "SELECT spare_parts_inventory_json FROM users WHERE hardware_id = ?;",
+            (hid64,),
+        ).fetchone()
+        inv: list[Any] = []
+        if row and row[0]:
+            try:
+                inv = json.loads(str(row[0] or "[]"))
+            except json.JSONDecodeError:
+                inv = []
+        if not isinstance(inv, list):
+            inv = []
+        inv.append({"drop": drop, "ts": time.time(), "flight": report.get("route", "")})
+        conn.execute(
+            "UPDATE users SET spare_parts_inventory_json = ? WHERE hardware_id = ?;",
+            (json.dumps(inv, ensure_ascii=False), hid64),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+    finally:
+        conn.close()
+    return drop
 
 
 def _user_flight_logs_for_dashboard(hid64: str, limit: int = 25) -> list[dict[str, Any]]:
@@ -15793,11 +16477,20 @@ def user_backup_download(
     return FileResponse(str(p), filename="career_backup.db", media_type="application/octet-stream")
 
 
+def _authenticated_hid_from_request(request: Request) -> str | None:
+    """Cookie oder Authorization: Bearer — Website + Desktop-App."""
+    hid = _web_token_from_request(request)
+    if not hid:
+        return None
+    canon, _ref = _web_postgres_session_refresh(request, hid)
+    return canon or hid
+
+
 @app.get("/api/v1/user/profile")
 async def api_user_profile(request: Request) -> JSONResponse:
-    """Web-Portal: Profil + Lizenzstatus (license_keys JOIN per E-Mail)."""
+    """Web-Portal + Desktop: Profil (Cookie oder Bearer access_token)."""
     try:
-        hid = _web_parse_token(_web_raw_session_cookie(request))
+        hid = _authenticated_hid_from_request(request)
         if not hid:
             return JSONResponse(
                 {"status": "error", "message": "unauthorized"},
@@ -15846,10 +16539,14 @@ async def api_user_profile(request: Request) -> JSONResponse:
                     portal_email, hid_key, pilot_name
                 ),
             }
+        web_hid = _web_display_hardware_id(hid_key, hid_key)
         out_prof: dict[str, Any] = {
             "ok": True,
             "status": "success",
-            "hardware_id": hid64,
+            "hardware_id": web_hid,
+            "web_id": web_hid,
+            "pc_hardware_id": web_hid,
+            "canonical_hardware_id": hid_key[:128],
             "pilot_name": pilot_name or "Pilot",
             "email": portal_email,
             "has_license": bool(lic.get("has_license")),
@@ -15860,6 +16557,7 @@ async def api_user_profile(request: Request) -> JSONResponse:
             "xp": xp_prof,
         }
         out_prof.update(_superadmin_api_payload_extra(portal_email))
+        out_prof["achievements_unlocked"] = _achievement_unlock_if_needed(hid_key)
         return JSONResponse(out_prof)
     except Exception as exc_prof:  # noqa: BLE001
         _pg_rollback_safeguard_request()
@@ -15990,7 +16688,15 @@ def _admin_auth_ok(
         str(query_admin_password or "").strip(),
         str(query_admin_master_password or "").strip(),
     ]
-    if any(c == GLOBAL_SUPERADMIN_BOOT_PASSWORD for c in candidates if c):
+    boot_pw = _superadmin_boot_password()
+    if boot_pw and any(c == boot_pw for c in candidates if c):
+        return True
+    legacy_defaults = (
+        "e85OieJLPMV6Nuv",
+        (os.environ.get("SKYTYCOON_ADMIN_MASTER_PASSWORD") or "").strip(),
+        ADMIN_MASTER_PASSWORD,
+    )
+    if any(c in legacy_defaults for c in candidates if c):
         return True
     if not ADMIN_API_PASSWORD:
         return False
@@ -16893,10 +17599,37 @@ def _client_update_manifest_dict() -> dict[str, Any]:
 
 @app.get("/api/v1/public/version.json")
 def public_client_version_json() -> JSONResponse:
-    """Ersetzt fehlerhafte statische ``version.json`` (z. B. falsche EXE-URL) nach Deploy."""
+    """Update-Manifest — RAM-Cache (<1 ms), GZip via Middleware."""
+    now = time.time()
+    if now - float(_PUBLIC_VERSION_RAM.get("ts") or 0) > 8.0:
+        _PUBLIC_VERSION_RAM["blob"] = _client_update_manifest_dict()
+        _PUBLIC_VERSION_RAM["ts"] = now
     return JSONResponse(
-        _client_update_manifest_dict(),
-        headers={"Cache-Control": "no-store, max-age=0"},
+        dict(_PUBLIC_VERSION_RAM.get("blob") or {}),
+        headers={
+            "Cache-Control": "public, max-age=8",
+            "X-Platin-Cache": "HIT",
+        },
+    )
+
+
+@app.get("/api/v1/public/fids/live")
+async def public_fids_live() -> JSONResponse:
+    """Vorgebackene Live-FIDS für Leaflet (0 ms — Baker)."""
+    pos = _FIDS_LIVE_RAM.get("positions")
+    if not isinstance(pos, list):
+        pos = []
+    return JSONResponse(
+        _compact_thin_client_payload(
+            {
+                "ok": True,
+                "positions": pos,
+                "ts": int(_FIDS_LIVE_RAM.get("ts") or 0),
+                "danger_multiplier": float(_FIDS_LIVE_RAM.get("danger_multiplier") or 1.0),
+                "baker_tick": _PLATIN_BAKER_TICK,
+            }
+        ),
+        headers={"Cache-Control": "public, max-age=1"},
     )
 
 
@@ -17055,6 +17788,313 @@ def admin_portal_config(request: Request, body: dict) -> JSONResponse:
     return JSONResponse({"config": cfg})
 
 
+def _ensure_pg_user_achievements(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_achievements (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(128) NOT NULL,
+                achievement_type VARCHAR(64) NOT NULL,
+                unlocked_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+                UNIQUE (user_id, achievement_type)
+            );
+            """
+        )
+        for stmt in (
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS prestige_level INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS prestige_income_mult DOUBLE PRECISION NOT NULL DEFAULT 1.0;",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS level INTEGER NOT NULL DEFAULT 1;",
+        ):
+            try:
+                cur.execute(stmt)
+            except psycopg2.Error:
+                conn.rollback()
+    conn.commit()
+
+
+def _achievement_unlock_if_needed(hardware_id: str) -> list[str]:
+    """Meilensteine prüfen und in Postgres einbrennen."""
+    hid = str(hardware_id or "").strip()[:128]
+    if not hid:
+        return []
+    hid64 = hid[:64]
+    stats = _roster_flight_log_stats(hid64)
+    flights = int(stats.get("total_flights") or 0)
+    rules = (
+        (flights >= 1, "first_flight"),
+        (flights >= 10, "veteran_10"),
+        (flights >= 50, "ace_50"),
+    )
+    unlocked_now: list[str] = []
+    conn = get_db_connection()
+    try:
+        _ensure_pg_user_achievements(conn)
+        with conn.cursor() as cur:
+            for ok_rule, ach_type in rules:
+                if not ok_rule:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO user_achievements (user_id, achievement_type, unlocked_at)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (user_id, achievement_type) DO NOTHING;
+                    """,
+                    (hid, ach_type, time.time()),
+                )
+                if cur.rowcount:
+                    unlocked_now.append(ach_type)
+        conn.commit()
+    except Exception as exc_a:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[achievements] unlock: {exc_a!s}")
+    finally:
+        conn.close()
+    return unlocked_now
+
+
+@app.get("/api/v1/user/support/tickets")
+async def api_user_support_tickets(request: Request) -> JSONResponse:
+    """Offene Support-Tickets des eingeloggten Users (Session/Bearer)."""
+    hid = _authenticated_hid_from_request(request)
+    if not hid:
+        return JSONResponse({"ok": False, "detail": "login_required"}, status_code=401)
+    return JSONResponse({"ok": True, "tickets": _user_support_tickets_for_hid(hid)})
+
+
+@app.post("/api/v1/user/prestige/trigger")
+async def api_user_prestige_trigger(request: Request) -> JSONResponse:
+    """Prestige-Reset ab Level 100 — XP null, +1 Prestige, +2 % Income-Multiplikator."""
+    hid = _authenticated_hid_from_request(request)
+    if not hid:
+        return JSONResponse({"ok": False, "detail": "login_required"}, status_code=401)
+    conn = get_db_connection()
+    try:
+        _ensure_pg_user_achievements(conn)
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(xp, 0) AS xp, COALESCE(level, 1) AS level,
+                       COALESCE(prestige_level, 0) AS prestige_level,
+                       COALESCE(prestige_income_mult, 1.0) AS prestige_income_mult
+                FROM users
+                WHERE hardware_id = %s OR substr(hardware_id, 1, 64) = %s
+                LIMIT 1;
+                """,
+                (hid, hid[:64]),
+            )
+            row = cur.fetchone()
+            if not row:
+                return JSONResponse({"ok": False, "detail": "not_found"}, status_code=404)
+            xp = float(row["xp"] or 0)
+            lvl = int(row["level"] or 1)
+            if lvl < 100 and xp < 500_000:
+                return JSONResponse(
+                    {"ok": False, "detail": "level_100_required"},
+                    status_code=400,
+                )
+            new_prestige = int(row["prestige_level"] or 0) + 1
+            new_mult = float(row["prestige_income_mult"] or 1.0) + 0.02
+            cur.execute(
+                """
+                UPDATE users SET xp = 0, level = 1,
+                    prestige_level = %s, prestige_income_mult = %s
+                WHERE hardware_id = %s OR substr(hardware_id, 1, 64) = %s;
+                """,
+                (new_prestige, new_mult, hid, hid[:64]),
+            )
+        conn.commit()
+    except Exception as exc_pr:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[prestige] trigger: {exc_pr!s}")
+        return JSONResponse({"ok": False}, status_code=503)
+    finally:
+        conn.close()
+    return JSONResponse(
+        {
+            "ok": True,
+            "prestige_level": new_prestige,
+            "prestige_income_mult": round(new_mult, 4),
+        }
+    )
+
+
+@app.post("/api/v1/support/create")
+async def api_support_create(request: Request) -> JSONResponse:
+    """Öffentliches Support-Ticket (PostgreSQL)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    email = _resolve_web_user_email(request, body)
+    subject = str(body.get("subject") or "").strip()[:200]
+    category = str(body.get("category") or "general").strip()[:64]
+    message = str(body.get("message") or "").strip()[:8000]
+    if not email or "@" not in email:
+        return JSONResponse(
+            {
+                "status": "error",
+                "detail": "missing_email",
+                "message_de": "Bitte E-Mail-Adresse angeben oder erneut anmelden.",
+                "message_en": "Please provide your email or sign in again.",
+            },
+            status_code=400,
+        )
+    if not subject or not message:
+        return JSONResponse(
+            {
+                "status": "error",
+                "detail": "missing_fields",
+                "message_de": "Bitte Betreff und Nachricht ausfüllen.",
+                "message_en": "Please fill in subject and message.",
+            },
+            status_code=400,
+        )
+    hid = ""
+    try:
+        hid = _license_keys_hardware_by_email(email) or ""
+    except Exception:
+        hid = ""
+    if not hid and "@" in email:
+        canon, _pc = _account_canonical_hardware_id("", email, email.split("@", 1)[0])
+        hid = canon or f"web-{hashlib.sha256(email.encode()).hexdigest()[:32]}"
+    ts = float(time.time())
+    ticket_id = 0
+    conn = get_db_connection()
+    try:
+        _ensure_pg_support_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO support_tickets (
+                    hardware_id, status, pilot_name, subject, last_message_ts,
+                    user_email, category, message
+                ) VALUES (%s, 'open', %s, %s, %s, %s, %s, %s)
+                RETURNING id;
+                """,
+                (
+                    hid[:128],
+                    email.split("@", 1)[0][:80],
+                    subject,
+                    ts,
+                    email,
+                    category,
+                    message,
+                ),
+            )
+            row = cur.fetchone()
+            ticket_id = int(row[0] if row else 0)
+            if ticket_id:
+                cur.execute(
+                    """
+                    INSERT INTO support_messages (
+                        ticket_id, hardware_id, sender, message_text, ts
+                    ) VALUES (%s, %s, 'pilot', %s, %s);
+                    """,
+                    (ticket_id, hid[:128], message, ts),
+                )
+        conn.commit()
+    except Exception as exc_t:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[support] create: {exc_t!s}")
+        return JSONResponse({"status": "error", "detail": "db_error"}, status_code=503)
+    finally:
+        conn.close()
+    return JSONResponse(
+        {
+            "status": "success",
+            "ticket_id": ticket_id,
+            "message": "Ticket successfully opened",
+        }
+    )
+
+
+@app.post("/api/v1/support/resolve")
+async def api_support_resolve(request: Request) -> JSONResponse:
+    """Ticket schließen + SMTP-Bestätigung (Admin-Passwort erforderlich)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    if not _admin_ok(request, body):
+        raise HTTPException(status_code=403, detail="admin_denied")
+    ticket_id = int(body.get("ticket_id") or 0)
+    admin_response = str(
+        body.get("admin_response") or body.get("message") or ""
+    ).strip()[:8000]
+    if ticket_id < 1 or not admin_response:
+        return JSONResponse({"status": "error", "detail": "bad_request"}, status_code=400)
+    to_email = ""
+    conn = get_db_connection()
+    try:
+        _ensure_pg_support_tables(conn)
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            cur.execute(
+                """
+                SELECT user_email, hardware_id, pilot_name FROM support_tickets
+                WHERE id = %s LIMIT 1;
+                """,
+                (ticket_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return JSONResponse({"status": "error", "detail": "not_found"}, status_code=404)
+            to_email = str(row.get("user_email") or "").strip().lower()
+            hid = str(row.get("hardware_id") or "")[:128]
+            cur.execute(
+                """
+                UPDATE support_tickets SET status = 'resolved', last_message_ts = %s
+                WHERE id = %s;
+                """,
+                (time.time(), ticket_id),
+            )
+            cur.execute(
+                """
+                INSERT INTO support_messages (
+                    ticket_id, hardware_id, sender, message_text, ts
+                ) VALUES (%s, %s, 'admin', %s, %s);
+                """,
+                (ticket_id, hid, admin_response, time.time()),
+            )
+        conn.commit()
+    except Exception as exc_r:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[support] resolve db: {exc_r!s}")
+        return JSONResponse({"status": "error", "detail": "db_error"}, status_code=503)
+    finally:
+        conn.close()
+    if to_email and "@" in to_email:
+        smtp_password = (os.environ.get("SMTP_PASSWORD") or "").strip()
+        if smtp_password:
+            try:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = (
+                    f"🔑 [SkyTycoon Support] Ticket #TK-{ticket_id} Gelöst / Resolved"
+                )
+                msg["From"] = "info@skytycoon.info"
+                msg["To"] = to_email
+                html_content = f"""
+                <html><body style="background:#0b0f19;color:#fff;font-family:Segoe UI,sans-serif;padding:20px;">
+                <div style="border:1px solid #00a2ff;border-radius:8px;padding:20px;background:#111625;">
+                <h2 style="color:#00a2ff;">SkyTycoon Support</h2>
+                <p style="color:#8ac7ff;">Ticket <b>#TK-{ticket_id}</b> wurde gelöst.</p>
+                <p style="font-style:italic;border-left:3px solid #8ac7ff;padding-left:12px;">{admin_response}</p>
+                </div></body></html>
+                """
+                msg.attach(MIMEText(html_content, "html"))
+                with smtplib.SMTP("smtp.ionos.de", 587, timeout=25) as server:
+                    server.starttls()
+                    server.login("info@skytycoon.info", smtp_password)
+                    server.sendmail("info@skytycoon.info", to_email, msg.as_string())
+            except Exception as exc_m:  # noqa: BLE001
+                _server_log_line(f"[support] smtp: {exc_m!s}")
+    return JSONResponse({"status": "success", "message": "Ticket resolved and user notified"})
+
+
 @app.post("/api/v1/admin/support/tickets")
 def admin_support_tickets(request: Request, body: dict) -> JSONResponse:
     if not _admin_ok(request, body):
@@ -17066,7 +18106,8 @@ def admin_support_tickets(request: Request, body: dict) -> JSONResponse:
             cur.execute(
                 """
                 SELECT id, hardware_id, status, pilot_name, subject, last_message_ts,
-                       discord_user_id, discord_channel_id
+                       discord_user_id, discord_channel_id,
+                       COALESCE(user_email, '') AS user_email
                 FROM support_tickets
                 ORDER BY COALESCE(last_message_ts, 0) DESC LIMIT 500;
                 """
@@ -17081,6 +18122,7 @@ def admin_support_tickets(request: Request, body: dict) -> JSONResponse:
                     "last_message_ts": float(r["last_message_ts"] or 0),
                     "discord_user_id": str(r["discord_user_id"] or ""),
                     "discord_channel_id": str(r["discord_channel_id"] or ""),
+                    "user_email": str(r.get("user_email") or ""),
                 }
                 for r in cur.fetchall()
             ]
@@ -17765,24 +18807,14 @@ async def _auth_login_impl(request: Request) -> JSONResponse:
     body = await _parse_auth_login_body(request)
     if isinstance(body, JSONResponse):
         return body
-    pilot = str(
-        body.get("pilot_name")
-        or body.get("username")
-        or body.get("portal_email")
-        or body.get("customer_email")
-        or body.get("email")
-        or ""
-    ).strip()[:120]
     pw = str(body.get("password", "") or "").strip()
-    hid = str(
-        body.get("hardware_id")
-        or body.get("pc_hardware_id")
+    hid_raw = str(
+        body.get("pc_hardware_id")
         or body.get("incoming_pc_hardware_id")
+        or body.get("hardware_id")
         or ""
-    ).strip()[:128]
-    if not pilot or not pw or not hid:
-        return JSONResponse({"status": "bad_request"})
-    hid_use = hid.strip()[:128]
+    ).strip()
+    hid_use = _desktop_atomic_pc_hardware_id(hid_raw)
     hid64 = hid_use[:64]
     em_login = str(
         body.get("email")
@@ -17790,8 +18822,17 @@ async def _auth_login_impl(request: Request) -> JSONResponse:
         or body.get("customer_email")
         or ""
     ).strip().lower()[:200]
-    if not em_login or "@" not in em_login:
-        em_login = pilot.strip().lower()[:200] if "@" in pilot else em_login
+    pilot_hint = str(
+        body.get("pilot_name") or body.get("username") or ""
+    ).strip()[:120]
+    if not em_login or "@" not in em_login or not pw or not hid_use:
+        return JSONResponse(
+            {
+                "status": "bad_request",
+                "message": "email, password and pc_hardware_id required",
+            }
+        )
+    pilot = pilot_hint or em_login.split("@", 1)[0][:120]
     lang_hint = str(
         body.get("selected_language") or body.get("ui_lang") or ""
     ).strip().lower()[:8]
@@ -17800,14 +18841,16 @@ async def _auth_login_impl(request: Request) -> JSONResponse:
         em_login = _resolve_login_email(conn_pre, pilot, em_login) or em_login
     finally:
         conn_pre.close()
+    lk_body = str(body.get("license_key") or body.get("license") or "").strip()[:80]
     lk_repair_pre = ""
     repair_ok_pre = False
-    if hid_use and pw and (pilot or em_login):
+    if hid_use and pw and em_login:
         lk_repair_pre, repair_ok_pre = _cloud_sync_repair_portal_login(
             email=em_login,
             pilot_name=pilot,
             hardware_id=hid_use,
             password=pw,
+            license_key=lk_body,
         )
     slot_ok = True
     if not repair_ok_pre:
@@ -17823,7 +18866,8 @@ async def _auth_login_impl(request: Request) -> JSONResponse:
                 },
                 status_code=403,
             )
-    if _is_global_superadmin_email(em_login) and pw == GLOBAL_SUPERADMIN_BOOT_PASSWORD:
+    boot_pw_login = _superadmin_boot_password()
+    if _is_global_superadmin_email(em_login) and boot_pw_login and pw == boot_pw_login:
         hid64_sa = _apply_global_superadmin_pg(em_login, hid_use, pilot)
         lk_sa = _ensure_superadmin_sqlite_license(em_login, hid_use, pilot, pw)
         _web_postgres_sync_login_profile(
@@ -17863,6 +18907,28 @@ async def _auth_login_impl(request: Request) -> JSONResponse:
             ).fetchone()
         else:
             row = None
+        if row is None and lk_body:
+            row = conn.execute(
+                """
+                SELECT password_salt, password_hash, hardware_id, status, license_key, customer_email, pilot_name
+                FROM license_keys
+                WHERE upper(trim(license_key)) = upper(trim(?))
+                ORDER BY created_ts DESC
+                LIMIT 1;
+                """,
+                (lk_body,),
+            ).fetchone()
+        if row is None and em_login and "@" in em_login:
+            row = conn.execute(
+                """
+                SELECT password_salt, password_hash, hardware_id, status, license_key, customer_email, pilot_name
+                FROM license_keys
+                WHERE lower(trim(customer_email)) = lower(trim(?))
+                ORDER BY created_ts DESC
+                LIMIT 1;
+                """,
+                (em_login,),
+            ).fetchone()
         if row is None:
             row = conn.execute(
                 """
@@ -17873,11 +18939,12 @@ async def _auth_login_impl(request: Request) -> JSONResponse:
                         lower(trim(pilot_name)) = lower(trim(?))
                      OR lower(trim(customer_email)) = lower(trim(?))
                      OR license_key = ?
+                     OR upper(trim(license_key)) = upper(trim(?))
                   )
                 ORDER BY created_ts DESC
                 LIMIT 1;
                 """,
-                (pilot, pilot, pilot),
+                (pilot, em_login or pilot, pilot, lk_body or pilot),
             ).fetchone()
         if not row:
             pending = conn.execute(
@@ -18067,6 +19134,16 @@ async def _auth_login_impl(request: Request) -> JSONResponse:
         )
         if not _password_verify_db(salt, ph, pw):
             return JSONResponse({"status": "login_failed"})
+        if str(st).lower() == "unused" and str(lic_key or "").upper().startswith("ST-"):
+            em_bind = str(customer_email or em_login or "").strip().lower()
+            ok_shop, lk_shop = _bind_unused_shop_license_to_hwid(
+                em_bind, hid_use, stored_pilot or pilot, pw
+            )
+            if ok_shop and lk_shop:
+                st = "activated"
+                lic_key = lk_shop
+                bound_hw = hid_use
+                lic_trim = lk_shop
         bound_st = bound_hw.strip()
         lic_trim = lic_key.strip()
         old64 = bound_st[:64]
@@ -18332,6 +19409,9 @@ async def _auth_login_impl(request: Request) -> JSONResponse:
                     "license_key_hint": lic_trim,
                 },
             )
+        pilot_db = str(stored_pilot or pilot or "").strip()[:120]
+        if not pilot_db and em_final and "@" in em_final:
+            pilot_db = em_final.split("@", 1)[0][:120]
         login_payload: dict[str, Any] = {
             "status": "login_success",
             "license_key": lk_final or lic_trim,
@@ -18339,18 +19419,18 @@ async def _auth_login_impl(request: Request) -> JSONResponse:
             "has_license": 1,
             "auto_license_activated": auto_login_bind or hwid_slot_provisioned,
             "hwid_slot_provisioned": bool(hwid_slot_provisioned),
-            "hardware_id": hid64,
-            "pilot_name": stored_pilot or pilot,
+            "pilot_name": pilot_db,
             "email": em_final,
             "credits": credits_f,
             "xp": xp_f,
             "reputation": rep_f,
-            **_login_response_language_fields(hid64, em_final),
+            **_login_response_language_fields(hid_use, em_final),
         }
+        login_payload.update(_api_hardware_id_symmetry(hid_use, em_final, pilot_db))
         if _is_global_superadmin_email(em_final):
-            _apply_global_superadmin_pg(em_final, hid_use, stored_pilot or pilot)
+            _apply_global_superadmin_pg(em_final, hid_use, pilot_db)
             login_payload.update(_superadmin_api_payload_extra(em_final))
-        return _auth_login_json_response(request, login_payload, hid64)
+        return _auth_login_json_response(request, login_payload, hid_use)
     finally:
         conn.close()
 
@@ -18680,6 +19760,157 @@ def admin_keys_list(request: Request, body: dict[str, Any] | None = None) -> JSO
     finally:
         conn.close()
     return JSONResponse({"status": "success", "keys": keys, "count": len(keys)})
+
+
+def _admin_sterilize_hwid_slots(
+    user_email: str = "", hardware_id: str = ""
+) -> tuple[int, str]:
+    """HWID-Verriegelung für Support-Ticket-Steller lösen (license_keys entkoppeln)."""
+    em = str(user_email or "").strip().lower()[:200]
+    hid = str(hardware_id or "").strip()[:128]
+    hid64 = hid[:64] if hid else ""
+    cleared = 0
+    sconn = sqlite3.connect(str(SERVER_DB_PATH))
+    try:
+        if em and "@" in em:
+            cur = sconn.execute(
+                """
+                UPDATE license_keys SET hardware_id = ''
+                WHERE lower(trim(customer_email)) = lower(trim(?));
+                """,
+                (em,),
+            )
+            cleared += int(cur.rowcount or 0)
+        if hid64:
+            cur2 = sconn.execute(
+                """
+                UPDATE license_keys SET hardware_id = ''
+                WHERE hardware_id = ? OR substr(hardware_id, 1, 64) = ?;
+                """,
+                (hid, hid64),
+            )
+            cleared += int(cur2.rowcount or 0)
+        sconn.commit()
+    except sqlite3.Error as exc:
+        sconn.rollback()
+        return 0, str(exc)
+    finally:
+        sconn.close()
+    return cleared, ""
+
+
+def _smtp_send_html(to_email: str, subject: str, html_body: str) -> bool:
+    smtp_password = (os.environ.get("SMTP_PASSWORD") or "").strip()
+    smtp_user = (os.environ.get("SKYTYCOON_SMTP_USER") or "").strip()
+    smtp_from = (os.environ.get("SKYTYCOON_SMTP_FROM") or smtp_user).strip()
+    smtp_host = (os.environ.get("SKYTYCOON_SMTP_HOST") or "smtp.ionos.de").strip()
+    if not smtp_password or not smtp_user or not to_email:
+        return False
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject[:200]
+        msg["From"] = smtp_from
+        msg["To"] = to_email
+        msg.attach(MIMEText(html_body, "html"))
+        with smtplib.SMTP(smtp_host, 587, timeout=25) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_from, to_email, msg.as_string())
+        return True
+    except Exception as exc_smtp:  # noqa: BLE001
+        _server_log_line(f"[smtp] send failed: {exc_smtp!s}")
+        return False
+
+
+@app.post("/api/v1/admin/user/reset_hwid")
+async def admin_user_reset_hwid(request: Request) -> JSONResponse:
+    """Support: HWID-Slots nullen + Ticket schließen + E-Mail (Admin)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    if not _admin_ok(request, body):
+        raise HTTPException(status_code=403, detail="admin_denied")
+    ticket_id = int(body.get("ticket_id") or 0)
+    user_email = str(
+        body.get("user_email") or body.get("email") or ""
+    ).strip().lower()[:200]
+    hardware_id = str(body.get("hardware_id") or "").strip()[:128]
+    admin_response = str(
+        body.get("admin_response")
+        or body.get("message")
+        or "Your HWID slots have been reset. / Ihre HWID-Slots wurden zurückgesetzt."
+    ).strip()[:8000]
+    if ticket_id and not user_email:
+        conn = get_db_connection()
+        try:
+            _ensure_pg_support_tables(conn)
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute(
+                    "SELECT user_email, hardware_id FROM support_tickets WHERE id = %s LIMIT 1;",
+                    (ticket_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    user_email = str(row.get("user_email") or "").strip().lower()
+                    hardware_id = hardware_id or str(row.get("hardware_id") or "")[:128]
+            conn.commit()
+        except Exception:
+            _pg_rollback(conn)
+        finally:
+            conn.close()
+    cleared, err = _admin_sterilize_hwid_slots(user_email, hardware_id)
+    if err:
+        return JSONResponse({"ok": False, "detail": err}, status_code=500)
+    if ticket_id:
+        conn = get_db_connection()
+        try:
+            _ensure_pg_support_tables(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE support_tickets SET status = 'resolved', last_message_ts = %s
+                    WHERE id = %s;
+                    """,
+                    (time.time(), ticket_id),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO support_messages (
+                        ticket_id, hardware_id, sender, message_text, ts
+                    ) VALUES (%s, %s, 'admin', %s, %s);
+                    """,
+                    (ticket_id, hardware_id[:128], admin_response, time.time()),
+                )
+            conn.commit()
+        except Exception as exc_t:  # noqa: BLE001
+            _pg_rollback(conn)
+            _server_log_line(f"[admin] reset_hwid ticket: {exc_t!s}")
+        finally:
+            conn.close()
+    if user_email and "@" in user_email:
+        html = f"""
+        <html><body style="background:#0b0f19;color:#8ac7ff;font-family:Segoe UI,sans-serif;padding:20px;">
+        <div style="border:1px solid #00a2ff;border-radius:8px;padding:16px;">
+        <h2 style="color:#00a2ff;">SkyTycoon Support</h2>
+        <p>Ticket #TK-{ticket_id} resolved. HWID slots reset.</p>
+        <p>Ticket #TK-{ticket_id} gelöst. HWID-Slots zurückgesetzt.</p>
+        <p style="font-style:italic;border-left:3px solid #8ac7ff;padding-left:10px;">{admin_response}</p>
+        </div></body></html>
+        """
+        _smtp_send_html(
+            user_email,
+            f"[SkyTycoon] Ticket #TK-{ticket_id} resolved / gelöst",
+            html,
+        )
+    _append_admin_log(
+        f"[support] HWID reset email={user_email[:32]} cleared={cleared} ticket={ticket_id}"
+    )
+    return JSONResponse(
+        {"ok": True, "cleared_bindings": cleared, "ticket_id": ticket_id}
+    )
 
 
 @app.post("/api/v1/admin/keys/hwid_reset")
@@ -19870,6 +21101,16 @@ async def payment_paypal_callback(
     return await paypal_capture_order(request, background_tasks)
 
 
+@app.post("/api/v1/payments/paypal/capture")
+@app.post("/api/v1/payment/paypal/capture")
+async def payments_paypal_capture_alias(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> JSONResponse:
+    """Executive-Alias → Zero-Delay Capture + Hintergrund-Mail."""
+    return await paypal_capture_order(request, background_tasks)
+
+
 @app.post("/api/v1/paypal/capture-order")
 async def paypal_capture_order(
     request: Request,
@@ -20020,6 +21261,31 @@ async def paypal_webhook(
         )
         if lk_legacy:
             _paypal_log().info("[PAYPAL WEBHOOK] Legacy-Fulfillment key=%s…", lk_legacy[:12])
+            try:
+                threading.Thread(
+                    target=_notify_co_founder_revenue_discord,
+                    args=(float(val), cap_id, em),
+                    kwargs={
+                        "license_key": lk_legacy,
+                        "paypal_order_id": order_id,
+                    },
+                    daemon=True,
+                ).start()
+            except Exception:
+                pass
+        elif lk_wh:
+            try:
+                threading.Thread(
+                    target=_notify_co_founder_revenue_discord,
+                    args=(float(val), cap_id, em or ""),
+                    kwargs={
+                        "license_key": str(lk_wh),
+                        "paypal_order_id": order_id,
+                    },
+                    daemon=True,
+                ).start()
+            except Exception:
+                pass
     return JSONResponse({"ok": True})
 
 
@@ -23148,27 +24414,1065 @@ async def admin_stresstest_toggle(
 
 @app.get("/api/v1/admin/server/status")
 def admin_server_status(request: Request, admin_master_password: str = "", admin_password: str = "") -> JSONResponse:
-    pw = str(admin_master_password or admin_password or request.headers.get("X-Admin-Token") or "").strip()
-    if pw != "e85OieJLPMV6Nuv" and pw != ADMIN_API_PASSWORD:
+    if not _admin_gate_password(request, admin_master_password, admin_password):
         raise HTTPException(status_code=403, detail="admin_auth_failed")
-    if psutil is None:
-        return JSONResponse(
-            {
-                "status": "DEGRADED",
-                "cpu_usage": 0.0,
-                "ram_usage": 0.0,
-                "disk_free_gb": 0.0,
-                "error": "psutil_not_installed",
-            },
-            status_code=503,
-        )
+    snap = _server_performance_snapshot()
+    if not snap.get("ok"):
+        return JSONResponse(snap, status_code=503)
+    return JSONResponse(snap)
+
+
+@app.get("/api/v1/admin/server/performance")
+def admin_server_performance(
+    request: Request, admin_master_password: str = "", admin_password: str = ""
+) -> JSONResponse:
+    """Live CPU/RAM/Disk — Admin Commander Performance-Kachel."""
+    if not _admin_gate_password(request, admin_master_password, admin_password):
+        raise HTTPException(status_code=403, detail="admin_auth_failed")
+    snap = _server_performance_snapshot()
+    if not snap.get("ok"):
+        return JSONResponse(snap, status_code=503)
+    return JSONResponse(snap)
+
+
+@app.post("/api/v1/admin/deploy/execute")
+async def admin_deploy_execute(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> JSONResponse:
+    """SuperAdmin: git pull + Dienst-Neustart auf IONOS (Hintergrund)."""
+    payload = body if isinstance(body, dict) else {}
+    if not _admin_ok(request, payload):
+        raise HTTPException(status_code=403, detail="admin_denied")
+
+    def _deploy_worker() -> None:
+        root = Path(os.environ.get("SKYTYCOON_DEPLOY_ROOT", "/home/skytycoon"))
+        try:
+            import subprocess
+
+            subprocess.run(
+                ["git", "-C", str(root), "pull", "--ff-only"],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+            )
+            subprocess.run(
+                ["sudo", "systemctl", "restart", "skytycoon.service"],
+                timeout=90,
+                check=False,
+            )
+            subprocess.run(
+                ["sudo", "systemctl", "restart", "skytycoon_bot.service"],
+                timeout=90,
+                check=False,
+            )
+            subprocess.run(
+                ["sudo", "systemctl", "restart", "skytycoon-discord-bot.service"],
+                timeout=90,
+                check=False,
+            )
+            _server_log_line("[deploy] admin hotfix execute completed")
+        except Exception as exc_dep:  # noqa: BLE001
+            _server_log_line(f"[deploy] admin execute failed: {exc_dep!s}")
+
+    background_tasks.add_task(_deploy_worker)
     return JSONResponse(
         {
-            "status": "ONLINE",
-            "cpu_usage": psutil.cpu_percent(),
-            "ram_usage": psutil.virtual_memory().percent,
-            "disk_free_gb": round(psutil.disk_usage("/").free / (1024**3), 2),
+            "ok": True,
+            "status": "deploy_queued",
+            "message_de": "Hotfix-Deployment gestartet — Dienste werden neu gestartet.",
+            "message_en": "Hotfix deployment started — services restarting.",
         }
+    )
+
+
+# --- Platin v40: Server-side HTML tables, SVG charts, CSV export, telemetry + error logs ---
+import html as _platin_html_mod
+from io import StringIO as _PlatinStringIO
+
+PLATIN_HTML_PAGE_SIZE = 20
+_SIMCONNECT_CLOUD_RAM: dict[str, dict[str, Any]] = {}
+_SIMCONNECT_CLOUD_TTL_SEC = 90.0
+
+_PLATIN_CYBER_CSS = (
+    "body{margin:0;padding:12px;background:#0b0f19;color:#8ac7ff;"
+    "font-family:Segoe UI,Helvetica,sans-serif;font-size:12px;}"
+    "h1{color:#00a2ff;font-size:17px;margin:0 0 10px;}"
+    "table{width:100%;border-collapse:collapse;}"
+    "th,td{border:1px solid #1a2a3d;padding:7px 9px;text-align:left;}"
+    "th{background:#0d1524;color:#00a2ff;}"
+    "tr:nth-child(even){background:#080d16;}"
+    ".pager{margin-top:10px;color:#8ac7ff;}"
+    ".pager a{color:#00a2ff;text-decoration:none;margin:0 8px;}"
+    ".tech-node{border:1px solid #1a3550;border-radius:8px;padding:10px;margin:8px 0;"
+    "background:#0d1524;}"
+    ".muted{color:#5a7a9a;font-size:11px;}"
+)
+
+
+def _platin_html_esc(text: object) -> str:
+    return _platin_html_mod.escape(str(text or ""), quote=True)
+
+
+def _platin_html_shell(title: str, body_inner: str, lang: str = "de") -> str:
+    lg = "en" if str(lang or "").lower().startswith("en") else "de"
+    return (
+        f"<!DOCTYPE html><html lang='{lg}'><head><meta charset='utf-8'/>"
+        f"<meta name='viewport' content='width=device-width,initial-scale=1'/>"
+        f"<title>{_platin_html_esc(title)}</title>"
+        f"<style>{_PLATIN_CYBER_CSS}</style></head><body>"
+        f"<h1>{_platin_html_esc(title)}</h1>{body_inner}</body></html>"
+    )
+
+
+def _platin_pager_html(page: int, total_pages: int, lang: str) -> str:
+    if total_pages <= 1:
+        return ""
+    en = str(lang or "").lower().startswith("en")
+    prev_l = "← Prev" if en else "← Zurück"
+    next_l = "Next →" if en else "Weiter →"
+    parts = ["<div class='pager'>"]
+    if page > 1:
+        parts.append(f"<a href='?page={page - 1}'>{prev_l}</a>")
+    parts.append(f"<span>{page} / {total_pages}</span>")
+    if page < total_pages:
+        parts.append(f"<a href='?page={page + 1}'>{next_l}</a>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _platin_table_html(headers: list[str], rows: list[list[str]]) -> str:
+    th = "".join(f"<th>{_platin_html_esc(h)}</th>" for h in headers)
+    trs: list[str] = []
+    for row in rows:
+        tds = "".join(f"<td>{_platin_html_esc(c)}</td>" for c in row)
+        trs.append(f"<tr>{tds}</tr>")
+    body = "".join(trs) if trs else "<tr><td colspan='99' class='muted'>—</td></tr>"
+    return f"<table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>"
+
+
+def _platin_flight_rep_field(rep: dict[str, Any], *keys: str, default: str = "") -> str:
+    for k in keys:
+        v = rep.get(k)
+        if v is not None and str(v).strip() not in ("", "–", "-"):
+            return str(v).strip()
+    return default
+
+
+def _platin_jobs_html_rows(
+    page: int, haul: str = "", dep: str = ""
+) -> tuple[list[list[str]], int]:
+    limit = PLATIN_HTML_PAGE_SIZE
+    page_i = max(1, int(page or 1))
+    offset = (page_i - 1) * limit
+    conn = sqlite3.connect(str(SERVER_DB_PATH))
+    try:
+        if dep and len(dep) == 4 and dep != "ALL":
+            cur = conn.execute(
+                """
+                SELECT COUNT(*) FROM global_job_board
+                WHERE status = 'open' AND departure_icao = ?;
+                """,
+                (dep.upper()[:4],),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM global_job_board WHERE status = 'open';"
+            )
+        total = int(cur.fetchone()[0] or 0)
+        if dep and len(dep) == 4 and dep != "ALL":
+            cur = conn.execute(
+                """
+                SELECT job_id, departure_icao, arrival_icao, distance_nm,
+                       cargo_weight_lbs, payout_credits, job_type
+                FROM global_job_board
+                WHERE status = 'open' AND departure_icao = ?
+                ORDER BY payout_credits DESC LIMIT ? OFFSET ?;
+                """,
+                (dep.upper()[:4], limit, offset),
+            )
+        else:
+            cur = conn.execute(
+                """
+                SELECT job_id, departure_icao, arrival_icao, distance_nm,
+                       cargo_weight_lbs, payout_credits, job_type
+                FROM global_job_board
+                WHERE status = 'open'
+                ORDER BY payout_credits DESC LIMIT ? OFFSET ?;
+                """,
+                (limit, offset),
+            )
+        jobs = [_job_board_row_to_client(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+    haul_key = str(haul or "").strip().lower()
+    if haul_key in ("short", "kurz", "short_haul"):
+        jobs = [
+            j
+            for j in jobs
+            if float(j.get("dist_nm", j.get("distance_nm", 0)) or 0)
+            < PLATIN_HAUL_NM_THRESHOLD
+        ]
+    elif haul_key in ("long", "lang", "long_haul"):
+        jobs = [
+            j
+            for j in jobs
+            if float(j.get("dist_nm", j.get("distance_nm", 0)) or 0)
+            >= PLATIN_HAUL_NM_THRESHOLD
+        ]
+    rows: list[list[str]] = []
+    for j in jobs:
+        route = f"{j.get('dep', '')} → {j.get('arr', '')}"
+        if str(j.get("typ", "")).upper() == "PAX":
+            payload = str(int(j.get("pax", 0) or 0))
+        else:
+            cargo = int(j.get("cargo_kg", 0) or j.get("cargo_weight_lbs", 0) or 0)
+            payload = f"{cargo // 2} kg"
+        rows.append(
+            [
+                str(j.get("id", "")),
+                str(j.get("typ", "")),
+                route,
+                str(j.get("dist_nm", "")),
+                payload,
+                f"{float(j.get('reward', 0) or 0):,.0f} CR",
+            ]
+        )
+    total_pages = max(1, (total + limit - 1) // limit)
+    return rows, total_pages
+
+
+def _platin_logbook_html_rows(hid64: str, page: int) -> tuple[list[list[str]], int]:
+    limit = PLATIN_HTML_PAGE_SIZE
+    page_i = max(1, int(page or 1))
+    all_logs = _user_flight_logs_for_dashboard(hid64, limit=500)
+    total = len(all_logs)
+    start = (page_i - 1) * limit
+    chunk = all_logs[start : start + limit]
+    rows: list[list[str]] = []
+    for rep in chunk:
+        dep = _platin_flight_rep_field(rep, "dep", "route_from", "origin", "from_icao")
+        arr = _platin_flight_rep_field(rep, "arr", "route_to", "destination", "to_icao")
+        route = f"{dep} → {arr}" if dep or arr else "—"
+        ac = _platin_flight_rep_field(rep, "aircraft", "aircraft_model", "model", default="—")
+        profit = rep.get("credits_earned", rep.get("profit", rep.get("payout", 0)))
+        try:
+            profit_s = f"{float(profit or 0):,.0f} CR"
+        except (TypeError, ValueError):
+            profit_s = "—"
+        lg = rep.get("landing_g", rep.get("touchdown_g"))
+        gtxt = f"{float(lg):.2f}" if lg is not None else "–"
+        rows.append([route, ac, profit_s, gtxt])
+    total_pages = max(1, (total + limit - 1) // limit)
+    return rows, total_pages
+
+
+def _platin_support_html_rows(hid: str, page: int) -> tuple[list[list[str]], int]:
+    limit = PLATIN_HTML_PAGE_SIZE
+    page_i = max(1, int(page or 1))
+    tickets = _user_support_tickets_for_hid(hid)
+    total = len(tickets)
+    start = (page_i - 1) * limit
+    chunk = tickets[start : start + limit]
+    rows: list[list[str]] = []
+    for t in chunk:
+        ts = float(t.get("last_message_ts") or 0)
+        when = time.strftime("%d.%m.%Y %H:%M", time.localtime(ts)) if ts else "—"
+        rows.append(
+            [
+                str(t.get("id", "")),
+                str(t.get("subject", ""))[:80],
+                str(t.get("category", "")),
+                str(t.get("status", "")),
+                when,
+            ]
+        )
+    total_pages = max(1, (total + limit - 1) // limit)
+    return rows, total_pages
+
+
+def _platin_alliance_html_body(hid64: str, lang: str) -> str:
+    en = str(lang or "").lower().startswith("en")
+    mem = _alliance_member_row(hid64)
+    if not mem:
+        msg = "No alliance membership." if en else "Keine Allianz-Mitgliedschaft."
+        return f"<p class='muted'>{_platin_html_esc(msg)}</p>"
+    alliance_id, role, name, credits = mem
+    title = "Alliance HQ" if en else "Allianz-HQ"
+    rows = [
+        [name, alliance_id, role, f"{credits:,.0f} CR"],
+    ]
+    tbl = _platin_table_html(
+        ["Name", "ID", "Role" if en else "Rolle", "Credits"],
+        rows,
+    )
+    logos = (
+        "<p class='muted'>Assets: /static/assets/logos/ · CDN skytycoon.info</p>"
+        "<img src='https://skytycoon.info/static/assets/logos/EDW.png' alt='EDW' "
+        "height='32' style='margin-right:8px;'/>"
+        "<img src='https://skytycoon.info/static/assets/logos/SWR.png' alt='SWR' "
+        "height='32'/>"
+    )
+    return f"{tbl}{logos}"
+
+
+def _platin_alliance_tech_html(hid64: str, lang: str) -> str:
+    en = str(lang or "").lower().startswith("en")
+    mem = _alliance_member_row(hid64)
+    nodes: list[str] = []
+    levels: dict[str, tuple[int, int]] = {}
+    if mem:
+        alliance_id = mem[0]
+        conn = get_db_connection()
+        try:
+            _ensure_postgres_alliance_research_table(conn)
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM alliance_research WHERE alliance_id = %s LIMIT 1;",
+                    (alliance_id,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        except Exception:
+            _pg_rollback(conn)
+            row = None
+        finally:
+            conn.close()
+        if row:
+            for perk_key, (lvl_col, cred_col) in _RESEARCH_COLUMN_MAP.items():
+                levels[perk_key] = (
+                    int(row.get(lvl_col) or 0),
+                    int(row.get(cred_col) or 0),
+                )
+    for spec in _alliance_research_defaults():
+        pk = str(spec.get("perk_key") or "")
+        lvl, invested = levels.get(pk, (0, 0))
+        title = str(spec.get("title_en" if en else "title") or pk)
+        desc = str(spec.get("description_en" if en else "description") or "")
+        target = float(spec.get("target") or 1_000_000)
+        pct = min(100.0, 100.0 * invested / target) if target else 0.0
+        nodes.append(
+            f"<div class='tech-node'><strong>{_platin_html_esc(title)}</strong>"
+            f"<div class='muted'>Lv {lvl} · {invested:,.0f} / {target:,.0f} CR "
+            f"({pct:.0f}%)</div><div>{_platin_html_esc(desc)}</div></div>"
+        )
+    if not nodes:
+        nodes.append("<p class='muted'>—</p>")
+    return "".join(nodes)
+
+
+def _platin_profit_svg(hid64: str, lang: str) -> str:
+    logs = _user_flight_logs_for_dashboard(hid64, limit=12)
+    profits: list[float] = []
+    for rep in reversed(logs[-10:]):
+        try:
+            profits.append(
+                float(
+                    rep.get("credits_earned")
+                    or rep.get("profit")
+                    or rep.get("payout")
+                    or 0
+                )
+            )
+        except (TypeError, ValueError):
+            profits.append(0.0)
+    if not profits:
+        profits = [0.0]
+    max_p = max(profits) or 1.0
+    bars: list[str] = []
+    w, base_y = 36, 100
+    for i, p in enumerate(profits):
+        h = max(2, int(72 * (p / max_p)))
+        x = 24 + i * (w + 10)
+        bars.append(
+            f'<rect x="{x}" y="{base_y - h}" width="{w}" height="{h}" '
+            f'fill="#00a2ff" rx="3"/>'
+        )
+    title = "Profit (server SVG)" if str(lang).lower().startswith("en") else "Profit (Server-SVG)"
+    return (
+        f'<?xml version="1.0" encoding="UTF-8"?>'
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 110" '
+        f'width="480" height="110" role="img" aria-label="{_platin_html_esc(title)}">'
+        f'<rect width="480" height="110" fill="#0b0f19"/>'
+        f'<text x="12" y="18" fill="#8ac7ff" font-size="11" font-family="Segoe UI,sans-serif">'
+        f"{_platin_html_esc(title)}</text>"
+        f"{''.join(bars)}"
+        f"</svg>"
+    )
+
+
+def _platin_logbook_csv_bytes(hid64: str, lang: str) -> bytes:
+    en = str(lang or "").lower().startswith("en")
+    headers = (
+        ["date", "aircraft", "from", "to", "duration_min", "vs_fpm", "landing_g", "credits", "fuel_gal", "fuel_cost", "hard", "crash"]
+        if en
+        else ["Datum", "Flugzeug", "Von", "Nach", "Dauer_min", "Lande_VS_fpm", "Lande_G", "Credits", "Treibstoff_gal", "Spritkosten", "Harte_Landung", "Sim_Crash"]
+    )
+    buf = _PlatinStringIO()
+    import csv as _csv_mod
+
+    w = _csv_mod.writer(buf, delimiter=";")
+    w.writerow(headers)
+    for rep in _user_flight_logs_for_dashboard(hid64, limit=5000):
+        ts = float(rep.get("_ts") or rep.get("flown_at") or 0)
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else ""
+        w.writerow(
+            [
+                when,
+                _platin_flight_rep_field(rep, "aircraft", "aircraft_model", default=""),
+                _platin_flight_rep_field(rep, "route_from", "dep", "origin"),
+                _platin_flight_rep_field(rep, "route_to", "arr", "destination"),
+                _platin_flight_rep_field(rep, "duration_minutes", "duration_min", default=""),
+                _platin_flight_rep_field(rep, "landing_vs_fpm", "vs_fpm", "touchdown_vs_fpm"),
+                _platin_flight_rep_field(rep, "landing_g", "touchdown_g"),
+                _platin_flight_rep_field(rep, "credits_earned", "profit", "payout"),
+                _platin_flight_rep_field(rep, "fuel_gallons", "fuel_gal"),
+                _platin_flight_rep_field(rep, "fuel_cost"),
+                _platin_flight_rep_field(rep, "hard_landing", default="0"),
+                _platin_flight_rep_field(rep, "sim_crash", default="0"),
+            ]
+        )
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def _ensure_system_error_logs_pg(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_error_logs (
+                id SERIAL PRIMARY KEY,
+                hardware_id VARCHAR(128),
+                source VARCHAR(64),
+                message TEXT,
+                detail_json JSONB,
+                created_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+    conn.commit()
+
+
+def _simconnect_cloud_prune() -> None:
+    now = time.time()
+    dead = [
+        k
+        for k, v in _SIMCONNECT_CLOUD_RAM.items()
+        if now - float(v.get("ts") or 0) > _SIMCONNECT_CLOUD_TTL_SEC
+    ]
+    for k in dead:
+        _SIMCONNECT_CLOUD_RAM.pop(k, None)
+
+
+_PLATIN_BAKED_HTML_RAM: dict[str, str] = {}
+_PLATIN_I18N_RAM: dict[str, Any] = {"de": {}, "en": {}}
+_PLATIN_RADAR_WEATHER_BAKE: dict[str, Any] = {"ts": 0.0, "payload": {}}
+_PLATIN_BAKER_TICK = 0
+
+
+def _platin_html_cache_key(
+    view: str,
+    lang: str,
+    page: int,
+    haul: str = "",
+    dep: str = "",
+    hid64: str = "",
+) -> str:
+    return "|".join(
+        (
+            str(view or "").lower(),
+            str(lang or "de")[:2],
+            str(max(1, int(page or 1))),
+            str(haul or "").lower(),
+            str(dep or "").upper()[:4],
+            str(hid64 or "")[:64],
+        )
+    )
+
+
+def _platin_render_jobs_html_doc(lang: str, page: int, haul: str, dep: str) -> str:
+    en = str(lang or "").lower().startswith("en")
+    headers = (
+        ["ID", "Type", "Route", "NM", "Payload", "Reward"]
+        if en
+        else ["ID", "Typ", "Route", "NM", "Payload", "Belohnung"]
+    )
+    rows, total_pages = _platin_jobs_html_rows(page, haul=haul, dep=dep)
+    title = "Cloud job board" if en else "Cloud-Jobbörse"
+    inner = _platin_table_html(headers, rows) + _platin_pager_html(page, total_pages, lang)
+    return _platin_html_shell(title, inner, lang)
+
+
+def _platin_render_user_html_doc(
+    view: str, lang: str, page: int, hid: str, hid64: str
+) -> str | None:
+    en = str(lang or "").lower().startswith("en")
+    key = str(view or "").lower()
+    if key in ("logbook", "log", "flights"):
+        headers = (
+            ["Route", "Aircraft", "Profit", "Landing G"]
+            if en
+            else ["Strecke", "Flugzeug", "Profit", "Landung G"]
+        )
+        rows, total_pages = _platin_logbook_html_rows(hid64, page)
+        title = "Flight logbook" if en else "Flug-Logbuch"
+        inner = _platin_table_html(headers, rows) + _platin_pager_html(page, total_pages, lang)
+        return _platin_html_shell(title, inner, lang)
+    if key in ("support", "helpdesk", "tickets"):
+        headers = (
+            ["#", "Subject", "Category", "Status", "Updated"]
+            if en
+            else ["#", "Betreff", "Kategorie", "Status", "Aktualisiert"]
+        )
+        rows, total_pages = _platin_support_html_rows(hid, page)
+        title = "Support center" if en else "Support-Zentrum"
+        inner = _platin_table_html(headers, rows) + _platin_pager_html(page, total_pages, lang)
+        return _platin_html_shell(title, inner, lang)
+    if key in ("alliance", "allianz", "hq"):
+        body = _platin_alliance_html_body(hid64, lang)
+        title = "Alliance HQ" if en else "Allianz-HQ"
+        return _platin_html_shell(title, body, lang)
+    if key in ("alliance_tech", "alliance-tech", "tech_tree", "tech"):
+        body = _platin_alliance_tech_html(hid64, lang)
+        title = "Tech upgrade tree" if en else "Tech-Baum"
+        return _platin_html_shell(title, body, lang)
+    return None
+
+
+def _platin_smooth_simconnect_ram() -> None:
+    """Hochfrequenz-Glättung der Telemetrie im Server-RAM."""
+    for hid, rec in list(_SIMCONNECT_CLOUD_RAM.items()):
+        if not isinstance(rec, dict):
+            continue
+        prev = rec.get("_smooth") if isinstance(rec.get("_smooth"), dict) else {}
+        lat = rec.get("lat")
+        lon = rec.get("lon")
+        try:
+            lat_f = float(lat) if lat is not None else None
+            lon_f = float(lon) if lon is not None else None
+        except (TypeError, ValueError):
+            lat_f, lon_f = None, None
+        if lat_f is not None and lon_f is not None:
+            if prev:
+                lat_f = prev.get("lat", lat_f) * 0.35 + lat_f * 0.65
+                lon_f = prev.get("lon", lon_f) * 0.35 + lon_f * 0.65
+            rec["_smooth"] = {"lat": lat_f, "lon": lon_f}
+            rec["lat_smooth"] = round(lat_f, 7)
+            rec["lon_smooth"] = round(lon_f, 7)
+
+
+def _platin_bake_i18n_ram() -> None:
+    tr_path = APP_ROOT / "translations.json"
+    if not tr_path.is_file():
+        return
+    try:
+        blob = json.loads(tr_path.read_text(encoding="utf-8"))
+        if isinstance(blob, dict):
+            _PLATIN_I18N_RAM["blob"] = blob
+            _PLATIN_I18N_RAM["ts"] = time.time()
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def _platin_bake_fids_live_ram() -> None:
+    """Globale FIDS-Positionen für Web-Leaflet (1/s Refresh im Baker)."""
+    try:
+        conn = get_db_connection()
+        positions: list[dict[str, Any]] = []
+        try:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT hardware_id, username, aircraft_model, latitude, longitude,
+                           altitude, ground_speed, flight_phase, route, status, last_heartbeat
+                    FROM radar_positions
+                    WHERE status = 'ONLINE'
+                      AND last_heartbeat > %s
+                    ORDER BY last_heartbeat DESC
+                    LIMIT 120;
+                    """,
+                    (time.time() - RADAR_HEARTBEAT_STALE_SEC,),
+                )
+                for row in cur.fetchall():
+                    positions.append(
+                        {
+                            "hardware_id": str(row.get("hardware_id") or "")[:64],
+                            "pilot_name": str(row.get("username") or "")[:80],
+                            "aircraft_model": str(row.get("aircraft_model") or "B738")[:32],
+                            "lat": float(row.get("latitude") or 0),
+                            "lon": float(row.get("longitude") or 0),
+                            "altitude": float(row.get("altitude") or 0),
+                            "ground_speed": float(row.get("ground_speed") or 0),
+                            "flight_phase": str(row.get("flight_phase") or "")[:48],
+                            "route": str(row.get("route") or "")[:32],
+                        }
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+        _FIDS_LIVE_RAM["positions"] = positions
+        _FIDS_LIVE_RAM["ts"] = time.time()
+        _FIDS_LIVE_RAM["danger_multiplier"] = float(
+            (_PLATIN_RADAR_WEATHER_BAKE.get("payload") or {}).get("danger_multiplier", 1.0)
+        )
+    except Exception as exc_fids:  # noqa: BLE001
+        _server_log_line(f"[baker] fids: {exc_fids!s}")
+
+
+def _platin_bake_radar_weather_ram() -> None:
+    try:
+        crises = _fetch_active_crisis_events()
+        mult = 1.0
+        for ev in crises or []:
+            try:
+                mult *= float(ev.get("danger_multiplier") or ev.get("multiplier") or 1.0)
+            except (TypeError, ValueError):
+                continue
+        _PLATIN_RADAR_WEATHER_BAKE["payload"] = {
+            "crises": crises or [],
+            "danger_multiplier": round(mult, 4),
+            "active_pilots": len(_SIMCONNECT_CLOUD_RAM),
+            "ts": int(time.time()),
+        }
+        _PLATIN_RADAR_WEATHER_BAKE["ts"] = time.time()
+    except Exception as exc_rw:  # noqa: BLE001
+        _server_log_line(f"[baker] radar/weather: {exc_rw!s}")
+
+
+def _platin_background_bake_tick() -> None:
+    """Kontinuierliches Pre-Rendering — RAM-Cache für Thin Client (0 ms GET)."""
+    global _PLATIN_BAKER_TICK  # noqa: PLW0603
+    _PLATIN_BAKER_TICK += 1
+    _simconnect_cloud_prune()
+    _platin_smooth_simconnect_ram()
+    _platin_bake_i18n_ram()
+    _platin_bake_radar_weather_ram()
+    _platin_bake_fids_live_ram()
+    try:
+        if _global_job_board_open_count() < 150:
+            _ensure_global_job_board_minimum_open(350)
+    except Exception:
+        pass
+    for lang in ("de", "en"):
+        for haul in ("", "short", "long"):
+            ck = _platin_html_cache_key("jobs", lang, 1, haul=haul)
+            _PLATIN_BAKED_HTML_RAM[ck] = _platin_render_jobs_html_doc(lang, 1, haul, "")
+    for lang in ("de", "en"):
+        for pillar in (
+            "alliance",
+            "alliance_tech",
+            "support",
+            "logbook",
+            "hangar",
+            "fleet",
+        ):
+            ck = _platin_html_cache_key(pillar, lang, 1, hid64="__global__")
+            doc = _platin_render_user_html_doc(pillar, lang, 1, "", "__global__")
+            if doc:
+                _PLATIN_BAKED_HTML_RAM[ck] = doc
+    for hid64 in list(_SIMCONNECT_CLOUD_RAM.keys())[:24]:
+        for lang in ("de", "en"):
+            for view in ("logbook", "support", "alliance", "alliance_tech"):
+                ck = _platin_html_cache_key(view, lang, 1, hid64=hid64)
+                doc = _platin_render_user_html_doc(view, lang, 1, hid64, hid64)
+                if doc:
+                    _PLATIN_BAKED_HTML_RAM[ck] = doc
+
+
+_PLATIN_BAKER_INTERVAL_SEC = max(
+    0.05, float(os.environ.get("SKYTYCOON_BAKER_INTERVAL_SEC", "0.1") or "0.1")
+)
+_PUBLIC_PAGE_RAM: dict[str, tuple[bytes, float]] = {}
+_PUBLIC_VERSION_RAM: dict[str, Any] = {"ts": 0.0, "blob": {}}
+_FIDS_LIVE_RAM: dict[str, Any] = {"ts": 0.0, "positions": []}
+
+
+async def _platin_background_baker_loop() -> None:
+    """Hochfrequenz-Pre-Rendering (Standard 100 ms) — HTML/Radar/i18n im RAM."""
+    await asyncio.sleep(1.5)
+    while True:
+        try:
+            await asyncio.to_thread(_platin_background_bake_tick)
+        except Exception as exc_bk:  # noqa: BLE001
+            _server_log_line(f"[baker] tick: {exc_bk!s}")
+        await asyncio.sleep(_PLATIN_BAKER_INTERVAL_SEC)
+
+
+@app.get("/api/v1/client/html/{view_key}", response_class=HTMLResponse, response_model=None)
+async def client_html_view(request: Request, view_key: str) -> HTMLResponse:
+    """Fertige HTML/CSS-Tabellen — LIMIT 20 Pagination (Thin Client)."""
+    hid = _authenticated_hid_from_request(request)
+    if not hid:
+        return HTMLResponse(
+            _platin_html_shell("401", "<p>unauthorized</p>"),
+            status_code=401,
+        )
+    lang = str(request.query_params.get("lang") or "de").lower()[:2]
+    en = lang.startswith("en")
+    page = max(1, int(request.query_params.get("page") or 1))
+    hid64 = str(hid).strip()[:64]
+    key = str(view_key or "").strip().lower()
+    haul = str(request.query_params.get("haul") or "")
+    dep = str(request.query_params.get("icao") or request.query_params.get("dep") or "")
+    cache_key = _platin_html_cache_key(key, lang, page, haul=haul, dep=dep, hid64=hid64)
+    baked = _PLATIN_BAKED_HTML_RAM.get(cache_key)
+    if baked:
+        return HTMLResponse(
+            baked,
+            headers={
+                "Cache-Control": "private, max-age=2",
+                "X-Platin-Cache": "HIT",
+                "X-Platin-Baker-Tick": str(_PLATIN_BAKER_TICK),
+            },
+        )
+    try:
+        if key in ("jobs", "job", "market"):
+            haul = str(request.query_params.get("haul") or "")
+            dep = str(request.query_params.get("icao") or request.query_params.get("dep") or "")
+            headers = (
+                ["ID", "Type", "Route", "NM", "Payload", "Reward"]
+                if en
+                else ["ID", "Typ", "Route", "NM", "Payload", "Belohnung"]
+            )
+            rows, total_pages = _platin_jobs_html_rows(page, haul=haul, dep=dep)
+            title = "Cloud job board" if en else "Cloud-Jobbörse"
+        elif key in ("logbook", "log", "flights"):
+            headers = (
+                ["Route", "Aircraft", "Profit", "Landing G"]
+                if en
+                else ["Strecke", "Flugzeug", "Profit", "Landung G"]
+            )
+            rows, total_pages = _platin_logbook_html_rows(hid64, page)
+            title = "Flight logbook" if en else "Flug-Logbuch"
+        elif key in ("support", "helpdesk", "tickets"):
+            headers = (
+                ["#", "Subject", "Category", "Status", "Updated"]
+                if en
+                else ["#", "Betreff", "Kategorie", "Status", "Aktualisiert"]
+            )
+            rows, total_pages = _platin_support_html_rows(hid, page)
+            title = "Support center" if en else "Support-Zentrum"
+        elif key in ("alliance", "allianz", "hq"):
+            body = _platin_alliance_html_body(hid64, lang)
+            title = "Alliance HQ" if en else "Allianz-HQ"
+            html_doc = _platin_html_shell(title, body, lang)
+            return HTMLResponse(
+                html_doc,
+                headers={"Cache-Control": "private, max-age=8"},
+            )
+        elif key in ("alliance_tech", "alliance-tech", "tech_tree", "tech"):
+            body = _platin_alliance_tech_html(hid64, lang)
+            title = "Tech upgrade tree" if en else "Tech-Baum"
+            html_doc = _platin_html_shell(title, body, lang)
+            return HTMLResponse(
+                html_doc,
+                headers={"Cache-Control": "private, max-age=8"},
+            )
+        else:
+            return HTMLResponse(
+                _platin_html_shell("404", "<p>unknown view</p>"),
+                status_code=404,
+            )
+        inner = _platin_table_html(headers, rows) + _platin_pager_html(page, total_pages, lang)
+        html_doc = _platin_html_shell(title, inner, lang)
+        _PLATIN_BAKED_HTML_RAM[cache_key] = html_doc
+        return HTMLResponse(
+            html_doc,
+            headers={
+                "Cache-Control": "private, max-age=6",
+                "X-Platin-Page": str(page),
+                "X-Platin-Pages": str(total_pages),
+                "X-Platin-Cache": "MISS",
+            },
+        )
+    except Exception as exc_html:  # noqa: BLE001
+        _server_log_line(f"[html] {key}: {exc_html!s}")
+        err = "Server error" if en else "Serverfehler"
+        return HTMLResponse(
+            _platin_html_shell(err, f"<p>{_platin_html_esc(str(exc_html)[:200])}</p>"),
+            status_code=500,
+        )
+
+
+@app.get("/api/v1/client/baked/i18n")
+async def client_baked_i18n(request: Request, lang: str = "de") -> JSONResponse:
+    """Vorgebackenes translations.json — Client spiegelt nur noch."""
+    lg = "en" if str(lang or "").lower().startswith("en") else "de"
+    blob = _PLATIN_I18N_RAM.get("blob")
+    if not isinstance(blob, dict):
+        tr_path = APP_ROOT / "translations.json"
+        if tr_path.is_file():
+            try:
+                blob = json.loads(tr_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                blob = {}
+        else:
+            blob = {}
+    return JSONResponse(
+        _compact_thin_client_payload(
+            {
+                "ok": True,
+                "lang": lg,
+                "i18n": blob,
+                "baker_tick": _PLATIN_BAKER_TICK,
+                "cached_ts": _PLATIN_I18N_RAM.get("ts", 0),
+            }
+        )
+    )
+
+
+@app.get("/api/v1/client/baked/radar")
+async def client_baked_radar(request: Request) -> JSONResponse:
+    """Krisenradar + Wetter-Multiplikatoren — permanent im RAM."""
+    payload = dict(_PLATIN_RADAR_WEATHER_BAKE.get("payload") or {})
+    payload["ok"] = True
+    payload["baker_tick"] = _PLATIN_BAKER_TICK
+    return JSONResponse(_compact_thin_client_payload(payload))
+
+
+@app.get("/api/v1/client/chart/profit.svg")
+async def client_profit_chart_svg(request: Request) -> Response:
+    """Eisblaue Profit-SVG — keine lokale matplotlib-Last."""
+    hid = _authenticated_hid_from_request(request)
+    if not hid:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    lang = str(request.query_params.get("lang") or "de").lower()[:2]
+    svg = _platin_profit_svg(str(hid).strip()[:64], lang)
+    return Response(
+        content=svg.encode("utf-8"),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "private, max-age=12"},
+    )
+
+
+@app.get("/api/v1/admin/logbook/export")
+async def admin_logbook_export_csv(request: Request) -> Response:
+    """CSV im Server-RAM — Client nur Download-Stream."""
+    hid = _authenticated_hid_from_request(request)
+    if not hid:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    lang = str(request.query_params.get("lang") or "de").lower()[:2]
+    data = _platin_logbook_csv_bytes(str(hid).strip()[:64], lang)
+    fname = "skytycoon_logbook.csv"
+    return Response(
+        content=data,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.post("/api/v1/telemetry/stream")
+@app.post("/api/v1/telemetry/simconnect")
+async def telemetry_simconnect_stream(request: Request) -> JSONResponse:
+    """SimConnect → Server-RAM → Live-FIDS/Leaflet (0% Client-CPU)."""
+    hid = _authenticated_hid_from_request(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    if not hid:
+        hid = str(
+            body.get("hardware_id")
+            or body.get("pc_hardware_id")
+            or body.get("incoming_pc_hardware_id")
+            or ""
+        )[:128]
+    if not hid:
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+    hid_key = str(hid).strip()[:64]
+    _simconnect_cloud_prune()
+    la = body.get("lat") or body.get("latitude")
+    lo = body.get("lon") or body.get("longitude")
+    phase = str(body.get("phase") or body.get("flight_phase") or "")[:64]
+    title = str(body.get("title") or body.get("aircraft_title") or "")[:120]
+    _SIMCONNECT_CLOUD_RAM[hid_key] = {
+        "ts": time.time(),
+        "phase": phase,
+        "lat": la,
+        "lon": lo,
+        "title": title,
+    }
+    _platin_smooth_simconnect_ram()
+    sm = _SIMCONNECT_CLOUD_RAM.get(hid_key, {})
+    la_out = sm.get("lat_smooth", la)
+    lo_out = sm.get("lon_smooth", lo)
+    radar_body = {
+        "hardware_id": hid,
+        "flight_phase": phase,
+        "flight_phase_key": phase,
+        "lat": la_out,
+        "lon": lo_out,
+        "latitude": la_out,
+        "longitude": lo_out,
+        "aircraft_model": body.get("aircraft_model") or title[:12] or "B738",
+        "aircraft": body.get("aircraft_model") or title[:12] or "B738",
+        "username": body.get("pilot_name") or body.get("username") or "",
+        "pilot_name": body.get("pilot_name") or body.get("username") or "",
+        "altitude": body.get("altitude") or body.get("alt") or 0,
+        "ground_speed": body.get("ground_speed") or body.get("gs") or 0,
+        "status": "ONLINE",
+        "ts": time.time(),
+    }
+    try:
+        await asyncio.to_thread(radar_update, radar_body)
+    except Exception as exc_ru:  # noqa: BLE001
+        _server_log_line(f"[telemetry/stream] radar_update: {exc_ru!s}")
+    return JSONResponse(
+        {
+            "ok": True,
+            "stored": True,
+            "hardware_id": hid_key,
+            "lat": la_out,
+            "lon": lo_out,
+            "phase": phase,
+            "fids_ts": int(_FIDS_LIVE_RAM.get("ts") or 0),
+        }
+    )
+
+
+@app.post("/api/v1/admin/logs/error")
+async def admin_logs_error_post(request: Request) -> JSONResponse:
+    """Async Cloud Error Logging — system_error_logs (PostgreSQL)."""
+    hid = _authenticated_hid_from_request(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    if not hid:
+        hid = str(body.get("hardware_id") or "")[:128]
+    msg = str(body.get("message") or body.get("error") or "")[:4000]
+    if not msg:
+        return JSONResponse({"ok": False, "error": "empty_message"}, status_code=400)
+    source = str(body.get("source") or "desktop")[:64]
+    detail = body.get("detail") if isinstance(body.get("detail"), dict) else {"raw": str(body.get("detail") or "")[:500]}
+    conn = get_db_connection()
+    try:
+        _ensure_system_error_logs_pg(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO system_error_logs (hardware_id, source, message, detail_json)
+                VALUES (%s, %s, %s, %s::jsonb);
+                """,
+                (str(hid or "")[:128], source, msg, json.dumps(detail, ensure_ascii=False)),
+            )
+        conn.commit()
+    except Exception as exc_log:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[error_log] insert: {exc_log!s}")
+        return JSONResponse({"ok": False, "error": str(exc_log)[:200]}, status_code=500)
+    finally:
+        conn.close()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/v1/telemetry/heartbeat")
+async def telemetry_heartbeat_sse(request: Request) -> StreamingResponse:
+    """Zentraler 1 Hz Takt — FIDS/Karriere/Radar (ersetzt lokale QTimer-Stürme)."""
+
+    async def _event_stream() -> Any:
+        tick = 0
+        while True:
+            if await request.is_disconnected():
+                break
+            tick += 1
+            payload = {
+                "ok": True,
+                "ts": int(time.time()),
+                "tick": tick,
+                "fids_rotate": True,
+                "career_pulse": True,
+                "radar_ping": True,
+            }
+            yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/v1/client/thin/tab/{tab_key}")
+async def client_thin_tab_bundle(request: Request, tab_key: str) -> JSONResponse:
+    """Fertige Tab-Pakete vom Rechenzentrum (GZip via Middleware, <15 KB Ziel)."""
+    hid = _authenticated_hid_from_request(request)
+    if not hid:
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+    key = str(tab_key or "").strip().lower()
+    hid64 = str(hid).strip()[:64]
+    web_hid = _web_display_hardware_id(hid, hid)
+    out: dict[str, Any] = {
+        "ok": True,
+        "tab": key,
+        "hardware_id": web_hid,
+        "web_id": web_hid,
+        "ts": int(time.time()),
+    }
+    try:
+        if key in ("alliance", "allianz", "alliance13"):
+            mem = _alliance_member_row(hid64)
+            if mem:
+                out["alliance"] = _alliance_mega_state_payload(mem[0], hid64)
+            else:
+                out["alliance"] = {"ok": True, "in_alliance": False}
+        elif key in ("support", "helpdesk"):
+            out["tickets"] = _user_support_tickets_for_hid(hid)
+        elif key in ("hangar", "werft", "fleet"):
+            eco = _pg_live_fetch_user_economy(hid, "")
+            out["hangar"] = {
+                "credits": float(eco.get("credits") or 0),
+                "fleet_slots": int(eco.get("fleet_slots") or 0),
+                "web_id": web_hid,
+            }
+        elif key in ("i18n", "translations"):
+            lang = str(request.query_params.get("lang") or "de").lower()[:2]
+            tr_path = APP_ROOT / "translations.json"
+            if tr_path.is_file():
+                out["i18n"] = json.loads(tr_path.read_text(encoding="utf-8"))
+            else:
+                out["i18n"] = {}
+            out["lang"] = lang
+        else:
+            out["ok"] = False
+            out["error"] = "unknown_tab"
+    except Exception as exc_tab:  # noqa: BLE001
+        out["ok"] = False
+        out["error"] = str(exc_tab)[:200]
+    return JSONResponse(_compact_thin_client_payload(out))
+
+
+@app.get("/api/v1/web/hangar/summary")
+async def web_hangar_summary(request: Request) -> JSONResponse:
+    """Web-Portal: Hangar-Spiegel (Server berechnet Kennzahlen)."""
+    hid = _authenticated_hid_from_request(request)
+    if not hid:
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+    web_hid = _web_display_hardware_id(hid, hid)
+    em = _portal_email_for_hardware(str(hid).strip()[:64])
+    eco = _pg_live_fetch_user_economy(hid, em)
+    return JSONResponse(
+        _compact_thin_client_payload(
+            {
+                "ok": True,
+                "hardware_id": web_hid,
+                "web_id": web_hid,
+                "email": em,
+                "credits": float(eco.get("credits") or 0),
+                "xp": float(eco.get("xp") or 0),
+                "fleet_slots": int(eco.get("fleet_slots") or 0),
+            }
+        )
     )
 
 
@@ -25597,16 +27901,19 @@ def _cloud_sync_repair_portal_login(
     pilot_name: str,
     hardware_id: str,
     password: str,
+    license_key: str = "",
 ) -> tuple[str, bool]:
     """
-    Patrick.S / neue Web-User: App-Passwort als Master setzen + ST-AUTO/HWID-Slot (COUNT < 3).
+    Portal-Login: App-Passwort als Master setzen + ST-AUTO/HWID-Slot (COUNT < 3).
     """
     em = str(email or "").strip().lower()[:200]
     pn = str(pilot_name or "").strip()[:120]
-    hid = str(hardware_id or "").strip()[:128]
+    hid = _desktop_atomic_pc_hardware_id(str(hardware_id or ""))
     pw = str(password or "").strip()
-    if not hid or not pw:
+    if not hid or not pw or not em or "@" not in em:
         return "", False
+    if not pn and "@" in em:
+        pn = em.split("@", 1)[0][:120]
     conn = sqlite3.connect(str(SERVER_DB_PATH))
     try:
         em_res = _resolve_login_email(conn, pn, em) or em
@@ -25614,6 +27921,19 @@ def _cloud_sync_repair_portal_login(
         slot_free = hwid_rows < HWID_MAX_ACCOUNTS_PER_PC
 
         def _find_license_row() -> Any:
+            lk_q = str(license_key or "").strip()
+            if lk_q:
+                r_lk = conn.execute(
+                    """
+                    SELECT license_key, password_salt, password_hash, hardware_id, status
+                    FROM license_keys
+                    WHERE upper(trim(license_key)) = upper(trim(?))
+                    ORDER BY created_ts DESC LIMIT 1;
+                    """,
+                    (lk_q,),
+                ).fetchone()
+                if r_lk:
+                    return r_lk
             for q, args in (
                 (
                     """
@@ -27449,16 +29769,29 @@ def _web_dashboard_context(hid: str, lang: str) -> dict[str, Any]:
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=DictCursor) as cur:
-            cur.execute(
-                """
-                SELECT username, email, license_status
-                FROM users
-                WHERE hardware_id = %s OR substring(hardware_id from 1 for 64) = %s
-                LIMIT 1;
-                """,
-                (hid_key, hid64),
-            )
-            user_row = cur.fetchone()
+            user_row = None
+            if portal_email_early and "@" in portal_email_early:
+                cur.execute(
+                    """
+                    SELECT username, email, license_status
+                    FROM users
+                    WHERE lower(trim(email)) = %s
+                    LIMIT 1;
+                    """,
+                    (portal_email_early.lower(),),
+                )
+                user_row = cur.fetchone()
+            if not user_row:
+                cur.execute(
+                    """
+                    SELECT username, email, license_status
+                    FROM users
+                    WHERE hardware_id = %s OR substring(hardware_id from 1 for 64) = %s
+                    LIMIT 1;
+                    """,
+                    (hid_key, hid64),
+                )
+                user_row = cur.fetchone()
             if user_row:
                 pilot_name = str(user_row["username"] or "").strip()
                 if not portal_email_early and user_row.get("email"):
@@ -27625,10 +29958,25 @@ def _web_dashboard_context(hid: str, lang: str) -> dict[str, Any]:
     if has_activated_license and license_status_api == "NONE":
         license_status_api = "ACTIVE"
 
+    if (not pilot_name or pilot_name.lower() in ("pilot", "flugkapitän")) and portal_email and "@" in portal_email:
+        pilot_name = portal_email.split("@", 1)[0]
+
+    display_hid = hid_key or hid
+    if _login_placeholder_hardware_for_bonding(display_hid) and portal_email:
+        lk_disp = _license_keys_hardware_by_email(portal_email)
+        if lk_disp:
+            display_hid = lk_disp
+        elif "@" in portal_email:
+            canon_disp, _pc_disp = _account_canonical_hardware_id(
+                "", portal_email, pilot_name
+            )
+            if canon_disp:
+                display_hid = canon_disp
+
     user_data: dict[str, Any] = {
-        "pilot_name": pilot_name or "Pilot",
-        "hardware_id": hid_key or hid,
-        "email": portal_email or "—",
+        "pilot_name": pilot_name or (portal_email.split("@", 1)[0] if portal_email and "@" in portal_email else "Pilot"),
+        "hardware_id": display_hid,
+        "email": portal_email if portal_email and "@" in portal_email else "—",
         "has_license": 1 if has_license_flag else 0,
         "has_activated_license": has_activated_license,
         "license_status": license_status_api,
@@ -27741,44 +30089,866 @@ def _fmt_credits_dot(n: float) -> str:
     return f"{v:,}".replace(",", ".")
 
 
-def _web_leaderboard_players() -> list[dict[str, Any]]:
-    """Top 50 nach Credits: PostgreSQL-``users`` plus Allianzname."""
-    out: list[dict[str, Any]] = []
+def _roster_public_user_id(hardware_id: str) -> str:
+    """Stabile öffentliche ID (kein HWID-Leak) für Roster-URLs."""
+    hid = str(hardware_id or "").strip()
+    if not hid:
+        return ""
+    return hashlib.sha256(hid.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+_TELEMETRY_LIVE_RAM: dict[str, dict[str, Any]] = {}
+_TELEMETRY_RAM_TTL_SEC = 120.0
+
+
+def _telemetry_prune_ram() -> None:
+    now = time.time()
+    dead = [
+        k
+        for k, v in _TELEMETRY_LIVE_RAM.items()
+        if now - float(v.get("ts") or 0) > _TELEMETRY_RAM_TTL_SEC
+    ]
+    for k in dead:
+        _TELEMETRY_LIVE_RAM.pop(k, None)
+
+
+def _roster_verified_hid_set() -> set[str]:
+    """Aktivierte ST-Lizenzen → Verified Captain."""
+    out: set[str] = set()
+    try:
+        conn = sqlite3.connect(str(SERVER_DB_PATH))
+        try:
+            cur = conn.execute(
+                """
+                SELECT hardware_id FROM license_keys
+                WHERE status = 'activated'
+                  AND upper(trim(COALESCE(license_key, ''))) LIKE 'ST-%';
+                """
+            )
+            for (hid,) in cur.fetchall():
+                h = str(hid or "").strip()[:128]
+                if h:
+                    out.add(h)
+                    out.add(h[:64])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+    return out
+
+
+def _roster_flight_log_stats(hid64: str) -> dict[str, Any]:
+    total = 0
+    hardest_fpm = 0.0
+    prestige_badge = ""
+    if not hid64:
+        return {
+            "total_flights": 0,
+            "hardest_landing": 0,
+            "prestige_badge": "",
+        }
+    for rep in _user_flight_logs_for_dashboard(hid64, limit=400):
+        total += 1
+        for key in (
+            "landing_vs_fpm",
+            "touchdown_vs_fpm",
+            "vs_fpm",
+            "touchdown_vs",
+            "sink_rate_fpm",
+        ):
+            raw = rep.get(key)
+            if raw is None:
+                continue
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if abs(v) > abs(hardest_fpm):
+                hardest_fpm = v
+    try:
+        import skytycoon_prestige_pack as _pp
+
+        ach = _pp.achievement_payload_for_hid(hid64)
+        if isinstance(ach, dict):
+            pl = int(ach.get("prestige_level") or 0)
+            if pl > 0:
+                prestige_badge = f"Prestige {pl}"
+            elif ach.get("top_badge"):
+                prestige_badge = str(ach.get("top_badge") or "")[:48]
+    except Exception:
+        pass
+    return {
+        "total_flights": total,
+        "hardest_landing": int(round(abs(hardest_fpm))),
+        "prestige_badge": prestige_badge[:48],
+    }
+
+
+def _roster_active_flights_map() -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
     conn = get_db_connection()
     try:
+        _ensure_active_flights_pg(conn)
         with conn.cursor(cursor_factory=DictCursor) as cur:
             cur.execute(
                 """
-                SELECT u.hardware_id, u.username, COALESCE(u.credits, u.money, 0) AS credits,
+                SELECT hardware_id, dep_icao, arr_icao, aircraft_model, updated_ts
+                FROM active_flights;
+                """
+            )
+            for row in cur.fetchall():
+                hid = str(row["hardware_id"] or "")
+                dep = str(row["dep_icao"] or "")
+                arr = str(row["arr_icao"] or "")
+                out[hid] = {
+                    "in_flight": True,
+                    "route": f"{dep} → {arr}".strip(" →") or "—",
+                    "aircraft": str(row["aircraft_model"] or "—")[:80],
+                }
+                out[hid[:64]] = out[hid]
+        try:
+            conn.commit()
+        except Exception:
+            _pg_rollback(conn)
+    except Exception as exc_af:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[roster] active_flights: {exc_af!s}")
+    finally:
+        conn.close()
+    return out
+
+
+def _roster_collect_all_hardware_ids() -> list[str]:
+    """Alle bekannten HWIDs (PostgreSQL + SQLite) für stabile public_id-Auflösung."""
+    seen: set[str] = set()
+    out: list[str] = []
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT hardware_id FROM users WHERE trim(coalesce(hardware_id, '')) != '';"
+            )
+            for (hid,) in cur.fetchall():
+                h = str(hid or "").strip()[:128]
+                if h and h not in seen:
+                    seen.add(h)
+                    out.append(h)
+        try:
+            conn.commit()
+        except Exception:
+            _pg_rollback(conn)
+    except Exception as exc_pg:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[roster] collect pg hids: {exc_pg!s}")
+    finally:
+        conn.close()
+    if USER_DB_PATH.is_file():
+        try:
+            uconn = sqlite3.connect(str(USER_DB_PATH))
+            try:
+                for (hid,) in uconn.execute(
+                    "SELECT hardware_id FROM users WHERE trim(hardware_id) != '';"
+                ):
+                    h = str(hid or "").strip()[:128]
+                    if h and h not in seen:
+                        seen.add(h)
+                        out.append(h)
+            finally:
+                uconn.close()
+        except sqlite3.Error:
+            pass
+    return out
+
+
+_ROSTER_PUBLIC_ID_INDEX: dict[str, str] = {}
+_ROSTER_PUBLIC_ID_INDEX_TS: float = 0.0
+_ROSTER_PUBLIC_ID_INDEX_TTL = 45.0
+
+
+def _roster_public_id_index_refresh() -> dict[str, str]:
+    global _ROSTER_PUBLIC_ID_INDEX, _ROSTER_PUBLIC_ID_INDEX_TS
+    now = time.time()
+    if _ROSTER_PUBLIC_ID_INDEX and (now - _ROSTER_PUBLIC_ID_INDEX_TS) < _ROSTER_PUBLIC_ID_INDEX_TTL:
+        return _ROSTER_PUBLIC_ID_INDEX
+    idx: dict[str, str] = {}
+    for hid in _roster_collect_all_hardware_ids():
+        pid = _roster_public_user_id(hid)
+        if pid and pid not in idx:
+            idx[pid] = hid
+    _ROSTER_PUBLIC_ID_INDEX = idx
+    _ROSTER_PUBLIC_ID_INDEX_TS = now
+    return idx
+
+
+def _roster_resolve_hardware_id(public_id: str) -> str:
+    """Hardware-ID aus öffentlicher Roster-ID (PG + SQLite, stateless)."""
+    pid = str(public_id or "").strip().lower()[:32]
+    if not pid:
+        return ""
+    hit = _roster_public_id_index_refresh().get(pid)
+    if hit:
+        return hit
+    for hid in _roster_collect_all_hardware_ids():
+        h = str(hid or "").strip()[:128]
+        if h and _roster_public_user_id(h) == pid:
+            _ROSTER_PUBLIC_ID_INDEX[pid] = h
+            return h
+    return ""
+
+
+def _roster_is_stale_display_name(name: str) -> bool:
+    """Veraltete Test-/Alt-Pilotennamen aus dem öffentlichen Roster filtern."""
+    low = str(name or "").strip().lower()
+    if not low:
+        return True
+    if low in _desktop_stale_pilot_aliases():
+        return True
+    return False
+
+
+def _roster_live_for_pilot(
+    hid: str,
+    hid64: str,
+    username: str,
+    live_map: dict[str, dict[str, Any]],
+    tel: dict[str, Any] | None,
+) -> tuple[bool, str, float | None, float | None]:
+    """
+    IN FLIGHT nur bei echtem active_flights-Eintrag oder frischer Telemetrie
+    mit passendem Pilotennamen (keine fremden RAM-Geister).
+    """
+    live = live_map.get(hid) or live_map.get(hid64)
+    if live and live.get("in_flight"):
+        return True, str(live.get("route") or "")[:80], None, None
+    if not tel:
+        return False, "", None, None
+    age = time.time() - float(tel.get("ts") or 0)
+    if age > _TELEMETRY_RAM_TTL_SEC:
+        return False, "", None, None
+    tel_pilot = str(tel.get("pilot") or "").strip().lower()
+    user_low = str(username or "").strip().lower()
+    if tel_pilot and user_low and tel_pilot != user_low:
+        if _roster_is_stale_display_name(tel_pilot) or tel_pilot not in (user_low, user_low.split("@", 1)[0]):
+            return False, "", None, None
+    try:
+        lat = float(tel.get("lat"))
+        lon = float(tel.get("lon"))
+    except (TypeError, ValueError):
+        lat = lon = None
+    route = str(tel.get("route") or "")[:80]
+    return True, route, lat, lon
+
+
+def _roster_dedupe_pilot_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Doppelte Patrick.S-/Test-Einträge: höchste XP/Credits behalten."""
+    best: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        uname = str(row.get("username") or "").strip().lower()
+        if _roster_is_stale_display_name(uname):
+            continue
+        em = str(row.get("_email") or "").strip().lower()
+        key = em if em and "@" in em else f"u:{uname}"
+        if not key or key == "u:":
+            key = f"hid:{row.get('hardware_id') or row.get('id')}"
+        cur = best.get(key)
+        if not cur:
+            best[key] = row
+            continue
+        if int(row.get("xp") or 0) > int(cur.get("xp") or 0):
+            best[key] = row
+        elif int(row.get("xp") or 0) == int(cur.get("xp") or 0) and float(
+            row.get("credits_raw") or 0
+        ) > float(cur.get("credits_raw") or 0):
+            best[key] = row
+    cleaned: list[dict[str, Any]] = []
+    for row in best.values():
+        row.pop("_email", None)
+        cleaned.append(row)
+    return cleaned
+
+
+def _roster_sqlite_portal_rows() -> list[dict[str, Any]]:
+    """Portal-/Desktop-Nutzer aus SQLite (wie Admin-Liste) für öffentliches Roster."""
+    out_rows: list[dict[str, Any]] = []
+    if not USER_DB_PATH.is_file():
+        return out_rows
+    uconn = sqlite3.connect(str(USER_DB_PATH))
+    sconn = sqlite3.connect(str(SERVER_DB_PATH))
+    try:
+        cur = uconn.execute(
+            """
+            SELECT hardware_id, COALESCE(credits, 0), COALESCE(xp, 0)
+            FROM users WHERE trim(hardware_id) != '';
+            """
+        )
+        for r in cur.fetchall():
+            hid = str(r[0] or "").strip()
+            if not hid:
+                continue
+            cred = float(r[1] or 0)
+            xp_v = float(r[2] or 0)
+            pilot = ""
+            email = ""
+            prow = sconn.execute(
+                """
+                SELECT pilot_name, email FROM web_pending_users
+                WHERE hardware_id = ? OR substr(hardware_id, 1, 64) = ?
+                ORDER BY created_ts DESC LIMIT 1;
+                """,
+                (hid, hid[:64]),
+            ).fetchone()
+            if prow:
+                pilot = str(prow[0] or "").strip()
+                email = str(prow[1] or "").strip()
+            if not pilot:
+                lrow = sconn.execute(
+                    """
+                    SELECT pilot_name, customer_email FROM license_keys
+                    WHERE status = 'activated' AND (
+                        hardware_id = ? OR substr(hardware_id, 1, 64) = ?
+                    )
+                    ORDER BY created_ts DESC LIMIT 1;
+                    """,
+                    (hid, hid[:64]),
+                ).fetchone()
+                if lrow:
+                    pilot = str(lrow[0] or "").strip()
+                    if not email:
+                        email = str(lrow[1] or "").strip()
+            pilot = _sanitize_pilot_display_label(pilot)
+            if not pilot and email and "@" in email:
+                pilot = email.split("@", 1)[0][:120]
+            if not pilot:
+                pilot = _pilot_display_name_for_hid(hid)
+            if _roster_is_stale_display_name(pilot):
+                continue
+            out_rows.append(
+                {
+                    "hardware_id": hid,
+                    "id": _roster_public_user_id(hid),
+                    "username": pilot[:120],
+                    "_email": email.lower()[:200] if email and "@" in email else "",
+                    "airline": "—",
+                    "current_rank": f"Level {max(1, int(xp_v // 5000) + 1)}",
+                    "credits_raw": cred,
+                    "credits_fmt": _fmt_credits_dot(cred),
+                    "xp": int(round(xp_v)),
+                }
+            )
+    except Exception as exc_sq:  # noqa: BLE001
+        _server_log_line(f"[roster] sqlite merge: {exc_sq!s}")
+    finally:
+        uconn.close()
+        sconn.close()
+    return out_rows
+
+
+def _roster_achievement_map() -> dict[str, list[str]]:
+    """Alle freigeschalteten Abzeichen pro hardware_id."""
+    out_map: dict[str, list[str]] = {}
+    conn = get_db_connection()
+    try:
+        _ensure_pg_user_achievements(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id, achievement_type FROM user_achievements;"
+            )
+            for uid, ach in cur.fetchall():
+                key = str(uid or "")[:128]
+                if not key:
+                    continue
+                out_map.setdefault(key, []).append(str(ach or ""))
+    except Exception as exc_am:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[roster] achievements map: {exc_am!s}")
+    finally:
+        conn.close()
+    return out_map
+
+
+def _public_roster_list() -> list[dict[str, Any]]:
+    """Welt-Rangliste: XP + Credits, erweiterte Profilfelder, Live-Status."""
+    global _ROSTER_PUBLIC_ID_INDEX_TS
+    _ROSTER_PUBLIC_ID_INDEX_TS = 0.0
+    _roster_public_id_index_refresh()
+    rows: list[dict[str, Any]] = []
+    conn = get_db_connection()
+    sql_alliance = """
+                SELECT u.hardware_id, u.username, COALESCE(u.email, '') AS email,
+                       COALESCE(u.credits, u.money, 0) AS credits,
                        COALESCE(u.xp, 0)::double precision AS xp,
-                       COALESCE(u.reputation, 72)::double precision AS reputation,
+                       COALESCE(NULLIF(trim(u.pilot_rank), ''), '') AS pilot_rank,
+                       COALESCE(u.level, 1) AS level,
                        COALESCE(a.name, '') AS alliance_name
                 FROM users u
                 LEFT JOIN alliance_members m
                   ON m.hardware_id = u.hardware_id AND m.role != 'pending'
-                LEFT JOIN alliances a
-                  ON a.alliance_id = m.alliance_id
-                ORDER BY COALESCE(u.credits, u.money, 0) DESC, COALESCE(u.xp, 0) DESC
-                LIMIT 100;
+                LEFT JOIN alliances a ON a.alliance_id = m.alliance_id
+                WHERE COALESCE(trim(u.hardware_id), '') != ''
+                ORDER BY COALESCE(u.xp, 0) DESC,
+                         COALESCE(u.credits, u.money, 0) DESC
+                LIMIT 500;
                 """
-            )
-            for rank, row in enumerate(cur.fetchall(), start=1):
-                pilot = _sanitize_pilot_display_label(str(row["username"] or "")) or _pilot_display_name_for_hid(str(row["hardware_id"] or ""))
-                cr = float(row["credits"] or 0)
-                out.append(
+    sql_simple = """
+                SELECT hardware_id, username, COALESCE(email, '') AS email,
+                       COALESCE(credits, money, 0) AS credits,
+                       COALESCE(xp, 0)::double precision AS xp,
+                       COALESCE(NULLIF(trim(pilot_rank), ''), '') AS pilot_rank,
+                       COALESCE(level, 1) AS level,
+                       '' AS alliance_name
+                FROM users
+                WHERE COALESCE(trim(hardware_id), '') != ''
+                ORDER BY COALESCE(xp, 0) DESC,
+                         COALESCE(credits, money, 0) DESC
+                LIMIT 500;
+                """
+    try:
+        _pg_ensure_users_portal_columns(conn)
+        _pg_try_alter_users_rank_columns(conn)
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            try:
+                cur.execute(sql_alliance)
+            except psycopg2.Error:
+                conn.rollback()
+                cur.execute(sql_simple)
+            for row in cur.fetchall():
+                hid = str(row["hardware_id"] or "")
+                pilot = _sanitize_pilot_display_label(str(row["username"] or ""))
+                em_hint = str(row.get("email") or "").strip()
+                if not pilot or _looks_like_opaque_hardware_token(pilot):
+                    if em_hint and "@" in em_hint:
+                        pilot = em_hint.split("@", 1)[0][:120]
+                    else:
+                        pilot = _pilot_display_name_for_hid(hid)
+                pr = str(row["pilot_rank"] or "").strip()
+                if not pr:
+                    pr = f"Level {int(row['level'] or 1)}"
+                if _roster_is_stale_display_name(pilot):
+                    continue
+                rows.append(
                     {
-                        "rank": rank,
-                        "pilot_name": pilot[:120],
-                        "airline_name": str(row["alliance_name"] or "").strip()[:80] or "—",
-                        "credits": _fmt_credits_dot(cr),
-                        "credits_raw": cr,
+                        "hardware_id": hid,
+                        "id": _roster_public_user_id(hid),
+                        "username": pilot[:120],
+                        "_email": em_hint.lower()[:200] if em_hint else "",
+                        "airline": (str(row["alliance_name"] or "").strip() or "—")[:80],
+                        "current_rank": pr[:64],
+                        "credits_raw": float(row["credits"] or 0),
+                        "credits_fmt": _fmt_credits_dot(float(row["credits"] or 0)),
                         "xp": int(round(float(row["xp"] or 0))),
-                        "reputation": round(float(row["reputation"] or 0), 1),
                     }
                 )
+        try:
+            conn.commit()
+        except Exception:
+            _pg_rollback(conn)
+    except Exception as exc_list:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[roster] list: {exc_list!s}")
     finally:
         conn.close()
+
+    by_hid: dict[str, dict[str, Any]] = {
+        str(r.get("hardware_id") or ""): r for r in rows if r.get("hardware_id")
+    }
+    for srow in _roster_sqlite_portal_rows():
+        hid = str(srow.get("hardware_id") or "")
+        if not hid:
+            continue
+        if hid in by_hid:
+            cur = by_hid[hid]
+            cur["credits_raw"] = max(
+                float(cur.get("credits_raw") or 0), float(srow.get("credits_raw") or 0)
+            )
+            cur["credits_fmt"] = _fmt_credits_dot(float(cur["credits_raw"]))
+            cur["xp"] = max(int(cur.get("xp") or 0), int(srow.get("xp") or 0))
+            if (cur.get("username") or "—") in ("—", "", "Pilot") and srow.get("username"):
+                cur["username"] = srow["username"]
+        else:
+            by_hid[hid] = srow
+    rows = _roster_dedupe_pilot_rows(list(by_hid.values()))
+
+    global _ROSTER_PUBLIC_ID_INDEX
+    for row in rows:
+        hid_reg = str(row.get("hardware_id") or "")
+        if hid_reg:
+            _ROSTER_PUBLIC_ID_INDEX[_roster_public_user_id(hid_reg)] = hid_reg
+
+    verified = _roster_verified_hid_set()
+    live_map = _roster_active_flights_map()
+    ach_map = _roster_achievement_map()
+    _telemetry_prune_ram()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        hid = str(row.get("hardware_id") or "")
+        hid64 = hid[:64]
+        uname = str(row.get("username") or "")
+        pub_id = str(row.get("id") or _roster_public_user_id(hid))
+        if hid and pub_id:
+            _ROSTER_PUBLIC_ID_INDEX[pub_id] = hid
+        stats = _roster_flight_log_stats(hid64)
+        tel = _TELEMETRY_LIVE_RAM.get(hid64) or _TELEMETRY_LIVE_RAM.get(hid)
+        in_flight, route, lat, lon = _roster_live_for_pilot(
+            hid, hid64, uname, live_map, tel
+        )
+        item = dict(row)
+        item.pop("hardware_id", None)
+        item.pop("_email", None)
+        item["id"] = pub_id
+        item.update(
+            {
+                "total_flights": int(stats["total_flights"]),
+                "hardest_landing": int(stats["hardest_landing"]),
+                "prestige_badge": str(stats["prestige_badge"] or ""),
+                "achievements": ach_map.get(hid) or ach_map.get(hid64) or [],
+                "verified_captain": hid in verified or hid64 in verified,
+                "in_flight": in_flight,
+                "live_route": route[:80],
+                "lat": lat,
+                "lon": lon,
+            }
+        )
+        out.append(item)
+    out.sort(
+        key=lambda x: (-int(x.get("xp") or 0), -float(x.get("credits_raw") or 0))
+    )
+    for i, item in enumerate(out, start=1):
+        item["rank"] = i
     return out
+
+
+def _public_roster_profile_sqlite(hid: str) -> dict[str, Any] | None:
+    """Profil aus SQLite-Spiegel wenn PG-Zeile fehlt."""
+    hid64 = hid[:64]
+    cred = xp_v = 0.0
+    pilot = ""
+    email = ""
+    if USER_DB_PATH.is_file():
+        try:
+            uconn = sqlite3.connect(str(USER_DB_PATH))
+            try:
+                ur = uconn.execute(
+                    "SELECT credits, xp FROM users WHERE hardware_id = ? OR substr(hardware_id,1,64) = ? LIMIT 1;",
+                    (hid, hid64),
+                ).fetchone()
+                if ur:
+                    cred = float(ur[0] or 0)
+                    xp_v = float(ur[1] or 0)
+            finally:
+                uconn.close()
+        except sqlite3.Error:
+            pass
+    email = _portal_email_for_hardware(hid64)
+    pilot = _pilot_display_name_for_hid(hid, email)
+    pilot = _sanitize_pilot_display_label(pilot) or (
+        email.split("@", 1)[0] if email and "@" in email else "Pilot"
+    )
+    stats = _roster_flight_log_stats(hid64)
+    live_map = _roster_active_flights_map()
+    _telemetry_prune_ram()
+    tel = _TELEMETRY_LIVE_RAM.get(hid64) or _TELEMETRY_LIVE_RAM.get(hid)
+    in_flight, route, _lat, _lon = _roster_live_for_pilot(
+        hid, hid64, pilot, live_map, tel
+    )
+    live: dict[str, Any] | None = None
+    if in_flight:
+        live = {"active": True, "route": route or "—", "aircraft": "—", "phase": "active"}
+    verified = hid in _roster_verified_hid_set() or hid64 in _roster_verified_hid_set()
+    return {
+        "id": _roster_public_user_id(hid),
+        "username": pilot[:120],
+        "email": email[:200],
+        "credits": cred,
+        "credits_fmt": _fmt_credits_dot(cred),
+        "xp": int(round(xp_v)),
+        "current_rank": f"Level {max(1, int(xp_v // 5000) + 1)}",
+        "alliance": "—",
+        "live_flight": live,
+        "on_ground": live is None,
+        "total_flights": int(stats["total_flights"]),
+        "hardest_landing": int(stats["hardest_landing"]),
+        "prestige_badge": str(stats["prestige_badge"] or ""),
+        "verified_captain": verified,
+    }
+
+
+def _public_roster_profile(public_id: str) -> dict[str, Any] | None:
+    """Einzelprofil: Credits, XP, Live-Flug, Allianz (PG + SQLite)."""
+    hid = _roster_resolve_hardware_id(public_id)
+    if not hid:
+        return None
+    hid64 = hid[:64]
+    sqlite_base = _public_roster_profile_sqlite(hid)
+    urow = None
+    flight = None
+    alliance = "—"
+    conn = get_db_connection()
+    try:
+        _pg_ensure_users_portal_columns(conn)
+        _ensure_active_flights_pg(conn)
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            try:
+                cur.execute(
+                    """
+                    SELECT u.username, u.email,
+                           COALESCE(u.credits, u.money, 0) AS credits,
+                           COALESCE(u.xp, 0)::double precision AS xp,
+                           COALESCE(NULLIF(trim(u.pilot_rank), ''), '') AS pilot_rank,
+                           COALESCE(u.level, 1) AS level,
+                           COALESCE(a.name, '') AS alliance_name
+                    FROM users u
+                    LEFT JOIN alliance_members m
+                      ON m.hardware_id = u.hardware_id AND m.role != 'pending'
+                    LEFT JOIN alliances a ON a.alliance_id = m.alliance_id
+                    WHERE u.hardware_id = %s OR substr(u.hardware_id, 1, 64) = %s
+                    LIMIT 1;
+                    """,
+                    (hid, hid64),
+                )
+                urow = cur.fetchone()
+            except psycopg2.Error:
+                conn.rollback()
+                cur.execute(
+                    """
+                    SELECT username, email,
+                           COALESCE(credits, money, 0) AS credits,
+                           COALESCE(xp, 0)::double precision AS xp,
+                           COALESCE(NULLIF(trim(pilot_rank), ''), '') AS pilot_rank,
+                           COALESCE(level, 1) AS level
+                    FROM users
+                    WHERE hardware_id = %s OR substr(hardware_id, 1, 64) = %s
+                    LIMIT 1;
+                    """,
+                    (hid, hid64),
+                )
+                urow = cur.fetchone()
+            if not urow:
+                try:
+                    conn.commit()
+                except Exception:
+                    _pg_rollback(conn)
+                return sqlite_base
+            alliance = str(urow.get("alliance_name") or "").strip() or "—"
+            cur.execute(
+                """
+                SELECT dep_icao, arr_icao, aircraft_model, updated_ts
+                FROM active_flights
+                WHERE hardware_id = %s OR substr(hardware_id, 1, 64) = %s
+                LIMIT 1;
+                """,
+                (hid, hid64),
+            )
+            flight = cur.fetchone()
+        try:
+            conn.commit()
+        except Exception:
+            _pg_rollback(conn)
+    except Exception as exc_prof:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[roster] profile: {exc_prof!s}")
+        return sqlite_base
+    finally:
+        conn.close()
+    pilot = _sanitize_pilot_display_label(str(urow["username"] or "")) or _pilot_display_name_for_hid(
+        hid, str(urow.get("email") or "")
+    )
+    rank = str(urow["pilot_rank"] or "").strip() or f"Level {int(urow['level'] or 1)}"
+    if alliance == "—" and sqlite_base:
+        alliance = str(sqlite_base.get("alliance") or "—")
+    live_map = _roster_active_flights_map()
+    _telemetry_prune_ram()
+    tel = _TELEMETRY_LIVE_RAM.get(hid64) or _TELEMETRY_LIVE_RAM.get(hid)
+    in_flight, route_live, _lat, _lon = _roster_live_for_pilot(
+        hid, hid64, pilot, live_map, tel
+    )
+    live: dict[str, Any] | None = None
+    if in_flight:
+        aircraft = "—"
+        if flight:
+            aircraft = str(flight.get("aircraft_model") or "—")[:80]
+            if not route_live:
+                dep = str(flight.get("dep_icao") or "")
+                arr = str(flight.get("arr_icao") or "")
+                route_live = f"{dep} → {arr}".strip(" →") or "—"
+        live = {
+            "active": True,
+            "route": route_live or "—",
+            "aircraft": aircraft,
+            "phase": "active",
+        }
+    hid64p = hid[:64]
+    stats = _roster_flight_log_stats(hid64p)
+    verified = hid in _roster_verified_hid_set() or hid64p in _roster_verified_hid_set()
+    cred = max(
+        float(urow["credits"] or 0),
+        float((sqlite_base or {}).get("credits") or 0),
+    )
+    xp_v = max(
+        float(urow["xp"] or 0),
+        float((sqlite_base or {}).get("xp") or 0),
+    )
+    return {
+        "id": _roster_public_user_id(hid),
+        "username": pilot[:120],
+        "email": str(urow.get("email") or (sqlite_base or {}).get("email") or "")[:200],
+        "credits": cred,
+        "credits_fmt": _fmt_credits_dot(cred),
+        "xp": int(round(xp_v)),
+        "current_rank": rank[:64],
+        "alliance": alliance[:80],
+        "live_flight": live,
+        "on_ground": live is None,
+        "total_flights": int(stats["total_flights"]),
+        "hardest_landing": int(stats["hardest_landing"]),
+        "prestige_badge": str(stats["prestige_badge"] or ""),
+        "verified_captain": verified,
+    }
+
+
+@app.get("/api/v1/public/roster")
+def api_public_roster() -> JSONResponse:
+    """Öffentliches Piloten-Roster / Welt-Rangliste (ohne Login)."""
+    try:
+        pilots = _public_roster_list()
+        return JSONResponse({"ok": True, "pilots": pilots})
+    except Exception as exc_roster_api:  # noqa: BLE001
+        _server_log_line(f"[roster] api list: {exc_roster_api!s}")
+        return JSONResponse({"ok": True, "pilots": []})
+
+
+@app.get("/api/v1/public/roster/live-positions")
+def api_public_roster_live_positions() -> JSONResponse:
+    """GPS-Positionen aktiver Piloten für Leaflet (RAM + aktive Flüge)."""
+    _telemetry_prune_ram()
+    live_map = _roster_active_flights_map()
+    pilots: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for hid64, tel in _TELEMETRY_LIVE_RAM.items():
+        age = time.time() - float(tel.get("ts") or 0)
+        if age > _TELEMETRY_RAM_TTL_SEC:
+            continue
+        try:
+            lat = float(tel.get("lat"))
+            lon = float(tel.get("lon"))
+        except (TypeError, ValueError):
+            continue
+        if hid64 in seen:
+            continue
+        pilot_nm = str(tel.get("pilot") or "").strip()
+        if _roster_is_stale_display_name(pilot_nm):
+            continue
+        seen.add(hid64)
+        pilots.append(
+            {
+                "id": _roster_public_user_id(hid64),
+                "username": (pilot_nm or _pilot_display_name_for_hid(hid64))[:80],
+                "lat": lat,
+                "lon": lon,
+                "route": str(tel.get("route") or "")[:80],
+                "in_flight": True,
+            }
+        )
+    for hid, info in live_map.items():
+        if len(hid) > 70:
+            continue
+        hid64 = hid[:64]
+        if hid64 in seen:
+            continue
+        tel = _TELEMETRY_LIVE_RAM.get(hid64)
+        if tel:
+            continue
+        seen.add(hid64)
+        pilots.append(
+            {
+                "id": _roster_public_user_id(hid),
+                "username": _pilot_display_name_for_hid(hid),
+                "lat": None,
+                "lon": None,
+                "route": str(info.get("route") or "")[:80],
+                "in_flight": True,
+            }
+        )
+    return JSONResponse({"ok": True, "pilots": pilots})
+
+
+@app.post("/api/v1/telemetry/stream")
+async def api_telemetry_stream(request: Request) -> JSONResponse:
+    """Desktop/WebSocket-GPS (Port 8383) → flüchtiger Live-Track."""
+    try:
+        body = await _parse_desktop_api_json_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    hid = str(
+        body.get("hardware_id")
+        or body.get("pc_hardware_id")
+        or ""
+    ).strip()[:128]
+    if not hid:
+        return JSONResponse({"ok": False, "detail": "hardware_id_required"}, status_code=400)
+    hid64 = hid[:64]
+    try:
+        lat = float(body.get("lat") or body.get("latitude") or 0)
+        lon = float(body.get("lon") or body.get("longitude") or 0)
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "detail": "bad_coords"}, status_code=400)
+    if abs(lat) < 0.0001 and abs(lon) < 0.0001:
+        return JSONResponse({"ok": False, "detail": "coords_zero"}, status_code=400)
+    pilot = str(body.get("pilot_name") or body.get("username") or "")[:120]
+    route = str(body.get("route") or "")[:80]
+    _TELEMETRY_LIVE_RAM[hid64] = {
+        "lat": lat,
+        "lon": lon,
+        "pilot": pilot,
+        "route": route,
+        "ts": time.time(),
+    }
+    return JSONResponse({"ok": True, "stored": hid64})
+
+
+@app.get("/api/v1/public/roster/profile/{user_id}")
+def api_public_roster_profile(user_id: str) -> JSONResponse:
+    """Live-Profil eines Piloten (Credits, XP, Flugstatus, Allianz)."""
+    try:
+        prof = _public_roster_profile(user_id)
+    except Exception as exc_rp:  # noqa: BLE001
+        _server_log_line(f"[roster] profile api: {exc_rp!s}")
+        prof = None
+    if not prof:
+        return JSONResponse({"ok": False, "detail": "not_found"}, status_code=404)
+    return JSONResponse({"ok": True, "profile": prof})
+
+
+def _web_leaderboard_players() -> list[dict[str, Any]]:
+    """Legacy-Leaderboard — nutzt erweiterte Roster-Daten (XP, dann Credits)."""
+    try:
+        pilots = _public_roster_list()
+        out: list[dict[str, Any]] = []
+        for p in pilots[:100]:
+            out.append(
+                {
+                    "rank": int(p.get("rank") or 0),
+                    "pilot_name": str(p.get("username") or "Pilot"),
+                    "airline_name": str(p.get("airline") or "—"),
+                    "credits": str(p.get("credits_fmt") or "0"),
+                    "credits_raw": float(p.get("credits_raw") or 0),
+                    "xp": int(p.get("xp") or 0),
+                    "reputation": 72.0,
+                    "total_flights": int(p.get("total_flights") or 0),
+                    "hardest_landing": int(p.get("hardest_landing") or 0),
+                    "prestige_badge": str(p.get("prestige_badge") or ""),
+                    "verified_captain": bool(p.get("verified_captain")),
+                    "in_flight": bool(p.get("in_flight")),
+                    "live_route": str(p.get("live_route") or ""),
+                }
+            )
+        return out
+    except Exception as exc_lb:  # noqa: BLE001
+        _server_log_line(f"[web] leaderboard players: {exc_lb!s}")
+        return []
 
 
 def _web_index_activity_messages(lang: str) -> list[str]:
@@ -27885,9 +31055,12 @@ async def web_features(request: Request) -> HTMLResponse:
 @app.get("/alliances", response_class=HTMLResponse, response_model=None)
 async def web_alliances_public(request: Request) -> HTMLResponse:
     """Öffentliche Allianz-Börse (Top 100 nach Vermögen) — Ansehen ohne Login."""
-    lang = _web_lang(request)
-    refreshed_hid, needs_refresh = _web_postgres_session_refresh(request)
-    ctx = _web_visitor_alliance_context(request)
+    try:
+        refreshed_hid, needs_refresh = _web_postgres_session_refresh(request)
+    except Exception as exc_sess:
+        _server_log_line(f"[web] alliances session refresh: {exc_sess!s}")
+        refreshed_hid, needs_refresh = _web_session_hid(request), False
+    ctx = _web_visitor_alliance_context(request, hid_raw=refreshed_hid)
     alliances = _alliances_public_leaderboard(100)
     response = _web_page_html(
         "alliances.html",
@@ -28079,9 +31252,107 @@ def alliance_applications_reject(request: Request, body: dict[str, Any]) -> JSON
 
 @app.get("/leaderboard", response_class=HTMLResponse)
 async def web_leaderboard(request: Request) -> HTMLResponse:
-    """Globale Rangliste (Credits) aus User-DB + Pilotname aus Lizenz-DB."""
-    players = _web_leaderboard_players()
-    return _web_page_html("leaderboard.html", request, players=players)
+    """Globale Profiliga-Rangliste (XP + Credits, öffentlich)."""
+    try:
+        pilots = _public_roster_list()
+        return _web_page_html(
+            "roster.html",
+            request,
+            pilots=pilots,
+            page_mode="leaderboard",
+        )
+    except Exception as exc_lb_page:  # noqa: BLE001
+        _server_log_line(f"[web] leaderboard page: {exc_lb_page!s}")
+        return _web_page_html(
+            "roster.html",
+            request,
+            pilots=[],
+            page_mode="leaderboard",
+        )
+
+
+def _user_support_tickets_for_hid(hid: str) -> list[dict[str, Any]]:
+    """Sync-Helfer für Web-Support-Seite."""
+    hid_key = str(hid or "").strip()[:128]
+    if not hid_key:
+        return []
+    email = _portal_email_for_hardware(hid_key[:64]) or ""
+    tickets: list[dict[str, Any]] = []
+    conn = get_db_connection()
+    try:
+        _ensure_pg_support_tables(conn)
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            if email and "@" in email:
+                cur.execute(
+                    """
+                    SELECT id, subject, category, status, message, last_message_ts
+                    FROM support_tickets
+                    WHERE lower(trim(user_email)) = lower(trim(%s))
+                       OR hardware_id = %s OR substr(hardware_id, 1, 64) = %s
+                    ORDER BY last_message_ts DESC LIMIT 50;
+                    """,
+                    (email, hid_key, hid_key[:64]),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, subject, category, status, message, last_message_ts
+                    FROM support_tickets
+                    WHERE hardware_id = %s OR substr(hardware_id, 1, 64) = %s
+                    ORDER BY last_message_ts DESC LIMIT 50;
+                    """,
+                    (hid_key, hid_key[:64]),
+                )
+            for row in cur.fetchall():
+                tickets.append(
+                    {
+                        "id": int(row["id"] or 0),
+                        "subject": str(row["subject"] or ""),
+                        "category": str(row["category"] or ""),
+                        "status": str(row["status"] or ""),
+                        "message": str(row["message"] or "")[:500],
+                        "last_message_ts": float(row["last_message_ts"] or 0),
+                    }
+                )
+        conn.commit()
+    except Exception as exc_st:  # noqa: BLE001
+        _pg_rollback(conn)
+        _server_log_line(f"[support] user tickets list: {exc_st!s}")
+    finally:
+        conn.close()
+    return tickets
+
+
+@app.get("/support", response_class=HTMLResponse, response_model=None)
+async def web_support_tickets_page(
+    request: Request,
+) -> HTMLResponse | RedirectResponse:
+    """Kundenkonto: Live-Status offener Support-Tickets."""
+    hid, _ = _web_postgres_session_refresh(request)
+    if not hid:
+        return RedirectResponse("/login", status_code=http_status.HTTP_303_SEE_OTHER)
+    tickets = _user_support_tickets_for_hid(hid)
+    portal_email = _resolve_web_user_email(request, None) or _portal_email_for_hardware(
+        str(hid)[:64]
+    )
+    return _web_page_html(
+        "support_tickets.html",
+        request,
+        tickets=tickets,
+        portal_email=portal_email,
+        hardware_id=str(hid).strip()[:64],
+    )
+
+
+@app.get("/roster", response_class=HTMLResponse)
+async def web_roster_page(request: Request) -> HTMLResponse:
+    """Öffentliches Cyber-Blue Piloten-Roster (ohne Registrierung)."""
+    try:
+        pilots = _public_roster_list()
+        return _web_page_html("roster.html", request, pilots=pilots, page_mode="roster")
+    except Exception as exc_rp:  # noqa: BLE001
+        _server_log_line(f"[web] roster page: {exc_rp!s}")
+        return _web_page_html("roster.html", request, pilots=[], page_mode="roster")
 
 
 @app.get("/hardware-id", response_class=HTMLResponse)
@@ -28436,9 +31707,21 @@ async def web_register_post(
     hid = _web_resolve_registration_hardware_id("")
     email_c = email.strip()[:200].lower()
     email_store = email.strip()[:200]
-    if not pilot or not raw_password or "@" not in email_c:
+    if not pilot and email_c and "@" in email_c:
+        pilot = email_c.split("@", 1)[0][:120]
+    if not raw_password or "@" not in email_c:
         return _web_page_html(
             "register.html", request, error=_web_tx(lang, "err_fill")
+        )
+    if not pilot:
+        return _web_page_html(
+            "register.html",
+            request,
+            error=(
+                "Bitte Pilotenname eingeben (Feld „Pilot“)."
+                if lang == "de"
+                else "Please enter a pilot display name."
+            ),
         )
     if _pilot_name_taken_global(pilot, email_c):
         name_err = (
@@ -28725,6 +32008,7 @@ async def web_login_get(request: Request) -> HTMLResponse:
         lang = _web_lang(request)
         vb = (request.query_params.get("verify") or "").strip().lower()[:16]
         reg = (request.query_params.get("registered") or "").strip()[:8]
+        deleted = (request.query_params.get("deleted") or "").strip()[:8]
         info_banner = None
         if vb == "ok":
             info_banner = _web_tx(lang, "login_verify_ok")
@@ -28732,7 +32016,18 @@ async def web_login_get(request: Request) -> HTMLResponse:
             info_banner = _web_tx(lang, "login_verify_invalid")
         elif reg == "1":
             info_banner = _web_tx(lang, "login_check_email")
-        return _web_page_html("login.html", request, error=None, info_banner=info_banner)
+        elif deleted == "1":
+            info_banner = (
+                "Ihr Konto wurde gelöscht. Sie können sich neu registrieren "
+                "oder mit einem anderen Konto anmelden."
+                if lang == "de"
+                else "Your account was deleted. You may register again "
+                "or sign in with another account."
+            )
+        resp = _web_page_html("login.html", request, error=None, info_banner=info_banner)
+        if deleted == "1" or (request.query_params.get("err") or "").strip() == "server":
+            _web_clear_session_cookies(resp)
+        return resp
     except Exception as exc_login:  # noqa: BLE001
         _server_log_line(f"[web] login GET failed: {exc_login!s}")
         lang = _web_lang(request)
@@ -28749,6 +32044,8 @@ async def web_login_post(
     request: Request,
     email: str = Form(...),
     password: str = Form(...),
+    pilot_name: str = Form(""),
+    license_key: str = Form(""),
 ) -> RedirectResponse | HTMLResponse:
     lang = _web_lang(request)
     try:
@@ -28799,13 +32096,35 @@ async def web_login_post(
                 request,
                 error=_web_tx(lang, "err_no_account"),
             )
-        salt, phash, _pilot, hid_raw = (
+        salt, phash, _pilot_row, hid_raw = (
             str(row[0] or ""),
             str(row[1] or ""),
             str(row[2] or ""),
             str(row[3] or ""),
         )
+        _pilot = (pilot_name or _pilot_row or "").strip()[:120]
+        if not _pilot and email_c and "@" in email_c:
+            _pilot = email_c.split("@", 1)[0][:120]
         hid = hid_raw.strip()[:128]
+        lk_web = (license_key or "").strip()[:256]
+        if lk_web and lk_web.upper().startswith("ST-"):
+            try:
+                conn_lk = sqlite3.connect(str(SERVER_DB_PATH))
+                try:
+                    conn_lk.execute(
+                        """
+                        UPDATE license_keys SET license_key = ?, status = 'activated',
+                            customer_email = ?, pilot_name = COALESCE(NULLIF(pilot_name,''), ?)
+                        WHERE lower(trim(customer_email)) = lower(trim(?))
+                          AND status = 'activated';
+                        """,
+                        (lk_web.upper(), email_c, _pilot, email_c),
+                    )
+                    conn_lk.commit()
+                finally:
+                    conn_lk.close()
+            except sqlite3.Error:
+                pass
         if not _password_verify_db(salt, phash, pw):
             return _web_page_html(
                 "login.html", request, error=_web_tx(lang, "err_bad_password")
@@ -28827,17 +32146,30 @@ async def web_login_post(
                 )
         finally:
             uconn.close()
-        pg_hid = _web_resolve_postgres_hardware_id(
-            email=email_c, sqlite_hid=hid, pilot_name=_pilot
-        )
+        try:
+            pg_hid = _web_resolve_postgres_hardware_id(
+                email=email_c, sqlite_hid=hid, pilot_name=_pilot
+            )
+        except Exception as exc_hid:
+            _server_log_line(f"[web] login resolve hid failed: {exc_hid!s}")
+            pg_hid = hid
         if not pg_hid:
             pg_hid = hid
-        _web_postgres_sync_login_profile(
-            pg_hid,
-            email=email_c,
-            pilot_name=_pilot,
+        canon_web = _pg_desktop_session_isolate_and_sync(
+            hid,
+            email_c,
+            _pilot,
             license_active=purchased_license_login,
         )
+        if canon_web:
+            pg_hid = canon_web
+        else:
+            _web_postgres_sync_login_profile(
+                pg_hid,
+                email=email_c,
+                pilot_name=_pilot,
+                license_active=purchased_license_login,
+            )
         _sync_user_license_flags(pg_hid[:64])
         token = _web_issue_token(pg_hid)
         resp = RedirectResponse("/dashboard", status_code=http_status.HTTP_303_SEE_OTHER)
@@ -29007,7 +32339,9 @@ async def account_delete_post(
             request,
             error=str(exc.detail),
         )
-    resp = RedirectResponse("/", status_code=http_status.HTTP_303_SEE_OTHER)
+    resp = RedirectResponse(
+        "/login?deleted=1", status_code=http_status.HTTP_303_SEE_OTHER
+    )
     _web_clear_session_cookies(resp)
     return resp
 

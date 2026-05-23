@@ -1,0 +1,3 @@
+# Kopieren nach superadmin_emails.local (wird nicht ins Git committed)
+# Eine Superadmin-E-Mail pro Zeile:
+# owner@example.com

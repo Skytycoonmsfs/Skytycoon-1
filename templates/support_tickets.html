@@ -1,0 +1,196 @@
+{% extends "base.html" %}{% block title %}Support · SkyTycoon Pro{% endblock %}
+{% block body %}
+<style>
+.sp-wrap { max-width:900px; margin:0 auto; padding:16px 20px 56px; }
+.sp-form {
+  background:linear-gradient(145deg,#0b0f19,#111625);
+  border:2px solid #00a2ff; border-radius:14px; padding:22px; margin-bottom:24px;
+  box-shadow:0 0 28px rgba(0,162,255,.18);
+}
+.sp-form h3 { color:#00a2ff; margin:0 0 14px; font-size:1.15rem; }
+.sp-form label { display:block; color:#8ac7ff; font-size:12px; font-weight:700; margin:10px 0 6px; text-transform:uppercase; letter-spacing:.06em; }
+.sp-form input, .sp-form select, .sp-form textarea {
+  width:100%; padding:12px 14px; border-radius:10px; border:1px solid #00a2ff;
+  background:#070a10; color:#eceff1; font-size:15px; box-sizing:border-box;
+}
+.sp-form textarea { min-height:140px; resize:vertical; }
+.sp-btn {
+  margin-top:16px; width:100%; padding:14px; border:none; border-radius:10px;
+  background:linear-gradient(135deg,#00a2ff,#0088cc); color:#fff; font-weight:800;
+  font-size:15px; cursor:pointer; letter-spacing:.03em;
+}
+.sp-btn:hover { filter:brightness(1.08); }
+.sp-btn:disabled { opacity:.55; cursor:not-allowed; }
+.sp-msg-ok { color:#a5d6a7; margin-top:10px; font-weight:700; }
+.sp-msg-err { color:#ef9a9a; margin-top:10px; font-weight:700; }
+.sp-card { background:#0b0f19; border:1px solid #00a2ff; border-radius:12px; padding:18px; margin-bottom:14px; }
+.sp-card h3 { color:#00a2ff; margin:0 0 8px; }
+.sp-status { display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:700; }
+.sp-open { background:rgba(0,162,255,.15); color:#8ac7ff; border:1px solid #00a2ff; }
+.sp-resolved { background:rgba(76,175,80,.12); color:#a5d6a7; border:1px solid #4caf50; }
+.sp-ticket-msg { color:#cfd8dc; font-size:14px; line-height:1.5; margin-top:10px; }
+.sp-meta { color:#78909c; font-size:12px; margin-top:8px; }
+#sp-ticket-list.sp-loading { opacity:.5; pointer-events:none; }
+</style>
+<div class="hero" style="padding-bottom:12px;">
+<h2 style="color:#00a2ff;">📬 {% if lang == 'de' %}Support-Zentrum{% else %}Support center{% endif %}</h2>
+<p style="color:#8ac7ff;text-align:center;">
+  {% if lang == 'de' %}Tickets erstellen &amp; Live-Status{% else %}Create tickets &amp; live status{% endif %}
+</p>
+</div>
+<div class="sp-wrap">
+<section class="sp-form" id="sp-new-ticket-form">
+  <h3>{% if lang == 'de' %}➕ Neues Support-Ticket{% else %}➕ New support ticket{% endif %}</h3>
+  <label for="sp-email">{% if lang == 'de' %}Ihre E-Mail (Konto){% else %}Your account email{% endif %}</label>
+  <input type="email" id="sp-email" maxlength="200" value="{{ portal_email|e }}"
+    placeholder="you@example.com" {% if portal_email %}readonly style="opacity:.92;"{% endif %}/>
+  <p class="sp-meta" style="margin-top:4px;">{% if lang == 'de' %}Wird aus Ihrer Anmeldung übernommen — bei Bedarf anpassen.{% else %}Taken from your login — edit if needed.{% endif %}</p>
+  <label for="sp-subject">{% if lang == 'de' %}Betreff / Subject{% else %}Subject{% endif %}</label>
+  <input type="text" id="sp-subject" maxlength="200" placeholder="{% if lang == 'de' %}Kurzbeschreibung…{% else %}Short summary…{% endif %}"/>
+  <label for="sp-category">{% if lang == 'de' %}Kategorie{% else %}Category{% endif %}</label>
+  <select id="sp-category">
+    <option value="license">{% if lang == 'de' %}Lizenz{% else %}License{% endif %}</option>
+    <option value="simconnect">SimConnect</option>
+    <option value="economy">{% if lang == 'de' %}Wirtschaft{% else %}Economy{% endif %}</option>
+    <option value="general">{% if lang == 'de' %}Allgemein{% else %}General{% endif %}</option>
+  </select>
+  <label for="sp-message">{% if lang == 'de' %}Deine Nachricht / Message{% else %}Your message{% endif %}</label>
+  <textarea id="sp-message" placeholder="{% if lang == 'de' %}Beschreiben Sie Ihr Anliegen…{% else %}Describe your issue…{% endif %}"></textarea>
+  <button type="button" class="sp-btn" id="sp-submit">
+    {% if lang == 'de' %}➕ Neues Support-Ticket eröffnen{% else %}➕ Open new support ticket{% endif %}
+  </button>
+  <p id="sp-feedback" role="status" aria-live="polite"></p>
+</section>
+
+<div id="sp-ticket-list">
+{% if tickets and tickets|length > 0 %}
+{% for t in tickets %}
+<div class="sp-card" data-ticket-id="{{ t.id }}">
+<h3>#TK-{{ t.id }} — {{ t.subject|e }}</h3>
+<span class="sp-status {% if t.status|lower == 'resolved' %}sp-resolved{% else %}sp-open{% endif %}">{{ t.status|upper }}</span>
+<p class="sp-meta">{{ t.category|e }}</p>
+<p class="sp-ticket-msg">{{ t.message|e }}</p>
+</div>
+{% endfor %}
+{% else %}
+<p id="sp-empty" style="text-align:center;color:#8ac7ff;padding:24px;">
+  {% if lang == 'de' %}Noch keine Support-Tickets.{% else %}No support tickets yet.{% endif %}
+</p>
+{% endif %}
+</div>
+
+<p style="text-align:center;margin-top:20px;"><a href="/dashboard" style="color:#00a2ff;">← {% if lang == 'de' %}Zurück zum Dashboard{% else %}Back to dashboard{% endif %}</a></p>
+</div>
+<script>
+(function(){
+  var portalEmail = {{ (portal_email or '')|tojson }};
+  var langDe = {{ 'true' if lang == 'de' else 'false' }};
+  var btn = document.getElementById('sp-submit');
+  var fb = document.getElementById('sp-feedback');
+  var list = document.getElementById('sp-ticket-list');
+  var emailIn = document.getElementById('sp-email');
+  if (emailIn && portalEmail) emailIn.value = portalEmail;
+  fetch('/api/v1/user/profile', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(j){
+      if (!j) return;
+      var em = (j.email || j.portal_email || '').trim();
+      if (em && emailIn) {
+        emailIn.value = em;
+        portalEmail = em;
+        if (em.indexOf('@') > 0) {
+          emailIn.readOnly = true;
+          emailIn.style.opacity = '0.92';
+        }
+      }
+    })
+    .catch(function(){});
+
+  function esc(s){
+    var d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+  }
+
+  function appendTicket(t){
+    var empty = document.getElementById('sp-empty');
+    if(empty) empty.remove();
+    var card = document.createElement('div');
+    card.className = 'sp-card';
+    card.setAttribute('data-ticket-id', String(t.id || ''));
+    card.innerHTML =
+      '<h3>#TK-' + esc(String(t.id)) + ' — ' + esc(t.subject) + '</h3>' +
+      '<span class="sp-status sp-open">OPEN</span>' +
+      '<p class="sp-meta">' + esc(t.category) + '</p>' +
+      '<p class="sp-ticket-msg">' + esc(t.message) + '</p>';
+    list.insertBefore(card, list.firstChild);
+  }
+
+  btn.addEventListener('click', function(){
+    var subject = (document.getElementById('sp-subject').value || '').trim();
+    var category = (document.getElementById('sp-category').value || 'general').trim();
+    var message = (document.getElementById('sp-message').value || '').trim();
+    fb.className = '';
+    fb.textContent = '';
+    var accountEmail = (emailIn && emailIn.value || portalEmail || '').trim().toLowerCase();
+    if(!accountEmail || accountEmail.indexOf('@') < 1){
+      fb.className = 'sp-msg-err';
+      fb.textContent = langDe
+        ? 'Bitte Ihre E-Mail eingeben (oder erneut unter /login anmelden).'
+        : 'Please enter your email (or sign in again at /login).';
+      return;
+    }
+    if(!subject || !message){
+      fb.className = 'sp-msg-err';
+      fb.textContent = langDe ? 'Bitte Betreff und Nachricht ausfüllen.' : 'Please fill subject and message.';
+      return;
+    }
+    btn.disabled = true;
+    list.classList.add('sp-loading');
+    fetch('/api/v1/support/create', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({
+        user_email: accountEmail,
+        email: accountEmail,
+        subject: subject,
+        category: category,
+        message: message
+      })
+    }).then(function(r){ return r.json().then(function(j){ return { ok: r.ok, j: j }; }); })
+      .then(function(res){
+        if(res.ok && (res.j.status === 'success' || res.j.ticket_id)){
+          fb.className = 'sp-msg-ok';
+          fb.textContent = langDe ? '✓ Ticket erfolgreich eröffnet.' : '✓ Ticket opened successfully.';
+          appendTicket({
+            id: res.j.ticket_id,
+            subject: subject,
+            category: category,
+            message: message,
+            status: 'open'
+          });
+          document.getElementById('sp-subject').value = '';
+          document.getElementById('sp-message').value = '';
+          return fetch('/api/v1/user/support/tickets', { credentials: 'same-origin' });
+        }
+        var detail = (res.j && res.j.detail) || 'error';
+        var msg = langDe
+          ? (res.j && res.j.message_de)
+          : (res.j && res.j.message_en);
+        throw new Error(msg || detail);
+      })
+      .catch(function(err){
+        fb.className = 'sp-msg-err';
+        fb.textContent = langDe
+          ? ('Fehler: ' + (err.message || 'Server'))
+          : ('Error: ' + (err.message || 'server'));
+      })
+      .finally(function(){
+        btn.disabled = false;
+        list.classList.remove('sp-loading');
+      });
+  });
+})();
+</script>
+{% endblock %}
