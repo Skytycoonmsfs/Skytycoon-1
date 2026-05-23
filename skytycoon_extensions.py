@@ -1012,6 +1012,8 @@ def _clear_stale_login_identity(main_mod: Any, db_path: Any) -> None:
         "ionos_jwt",
         "platin_superadmin",
         "alliance_snapshot_json",
+        "ionos_hardware_id",
+        "econ_device_tag",
     ):
         try:
             main_mod.app_meta_set(db_path, key, "")
@@ -1034,6 +1036,8 @@ def _platin_seal_login_session(
     """Nach login_success: JWT/Passwort/Pilot bombenfest im RAM + SQLite behalten."""
     if not isinstance(login_json, dict):
         login_json = {}
+    local_hid = _normalize_client_hwid(main_mod, db_path, force_os=False)
+    _bind_server_hardware_id(main_mod, db_path, login_json, local_hid)
     _store_login_access_token(main_mod, db_path, login_json)
     tok = str(
         login_json.get("access_token")
@@ -1047,14 +1051,52 @@ def _platin_seal_login_session(
     if pw:
         main_mod.cloud_password_set(db_path, pw)
     pilot_n = (pilot or "").strip()
-    if pilot_n:
-        main_mod.app_meta_set(db_path, "pilot_display_name", pilot_n[:120])
-        main_mod.app_meta_set(db_path, "pilot_name", pilot_n[:120])
     em = _resolve_portal_email_from_login(pilot_n, login_json)
+    srv_em = str(login_json.get("email") or login_json.get("portal_email") or "").strip().lower()
+    if srv_em and "@" in srv_em:
+        em = srv_em[:200]
+    display = str(
+        login_json.get("pilot_name")
+        or login_json.get("display_name")
+        or login_json.get("username")
+        or ""
+    ).strip()
+    if not display and pilot_n and "@" not in pilot_n:
+        display = pilot_n
+    if not display and em and "@" in em:
+        display = em.split("@", 1)[0]
+    if display and "@" not in display:
+        main_mod.app_meta_set(db_path, "pilot_display_name", display[:120])
+        main_mod.app_meta_set(db_path, "pilot_name", display[:120])
+    elif em and "@" in em:
+        main_mod.app_meta_set(db_path, "pilot_display_name", em[:120])
+        main_mod.app_meta_set(db_path, "pilot_name", em.split("@", 1)[0][:120])
     if em:
         main_mod.app_meta_set(db_path, "portal_email", em)
         main_mod.app_meta_set(db_path, "career_bound_portal_email", em)
     main_mod.app_meta_set(db_path, "online_network_enabled", "1")
+
+
+def _platin_apply_cockpit_identity(win: Any, main_mod: Any, db_path: Any) -> None:
+    """Cockpit-Labels: Portal-E-Mail + kanonische HWID (nicht alter Login-Name)."""
+    if win is None:
+        return
+    try:
+        em = (main_mod.app_meta_get(db_path, "portal_email", "") or "").strip()
+        pilot = (main_mod.app_meta_get(db_path, "pilot_display_name", "") or "").strip()
+        hid = _normalize_client_hwid(main_mod, db_path)
+        line = em if "@" in em else (pilot or "—")
+        if hasattr(win, "label_brand_pilot"):
+            win.label_brand_pilot.setText(line)
+        if hasattr(win, "label_career_pilot_line"):
+            win.label_career_pilot_line.setText(f"👤 {line}")
+        sb = win.statusBar() if hasattr(win, "statusBar") else None
+        if sb is not None and hid:
+            sb.showMessage(f"Portal: {line} · HWID {hid[:20]}…", 8000)
+        if hasattr(win, "_apply_branded_window_title"):
+            win._apply_branded_window_title()
+    except Exception as exc:
+        print(f"[SkyTycoon] Cockpit-Identity: {exc!s}", flush=True)
 
 
 def _platin_instant_cockpit_open(win: Any) -> None:
@@ -1139,8 +1181,16 @@ def _store_login_access_token(main_mod: Any, db_path: Any, payload: dict[str, An
         main_mod.app_meta_set(db_path, "ionos_jwt", tok[:4096])
 
 
-def _normalize_client_hwid(main_mod: Any, db_path: Any) -> str:
-    """Saubere HWID als JSON-String (64 Zeichen, kein Dict/Quote-Müll)."""
+def _normalize_client_hwid(
+    main_mod: Any, db_path: Any, *, force_os: bool = False
+) -> str:
+    """Saubere HWID (64 Zeichen). force_os=True: echte Windows-UUID vor Login erzwingen."""
+    if force_os:
+        for key in ("ionos_hardware_id", "econ_device_tag"):
+            try:
+                main_mod.app_meta_set(db_path, key, "")
+            except Exception:
+                pass
     try:
         if hasattr(main_mod, "ensure_ionos_hardware_id_from_os"):
             main_mod.ensure_ionos_hardware_id_from_os(db_path)
@@ -1468,6 +1518,7 @@ def _platin_login_accept(
         parent._platin_license_trusted = True
         parent._platin_license_prompt_block_until = time.time() + 86400.0
         parent._platin_auth_gate_done = True
+        _platin_apply_cockpit_identity(parent, main_mod, db_path)
         _platin_instant_cockpit_open(parent)
     sky_orig = getattr(type(dlg), "_sky_orig_accept", None)
     if callable(sky_orig):
@@ -1706,12 +1757,6 @@ def _prefill_startup_auth_from_local_session(dlg: Any, main_mod: Any, db_path: A
     cb = getattr(dlg, "_platin_remember_cb", None)
     if cb is not None:
         cb.setChecked(True)
-    tok = str(sess.get("access_token") or "").strip()
-    if tok:
-        main_mod.app_meta_set(db_path, "ionos_jwt", tok[:4096])
-    em = str(sess.get("portal_email") or "").strip().lower()
-    if em and "@" in em:
-        main_mod.app_meta_set(db_path, "portal_email", em[:200])
     return bool(user and pw)
 
 
@@ -1883,7 +1928,7 @@ def _sterile_login_json(
     portal_email: str = "",
 ) -> dict[str, str]:
     """Minimaler Login/cloud_sync-Body: username, password, pc_hardware_id (+ optional E-Mail)."""
-    hid = _normalize_client_hwid(main_mod, db_path)
+    hid = _normalize_client_hwid(main_mod, db_path, force_os=True)
     pilot = _sterile_api_string(username, max_len=120)
     pw = _sterile_api_string(password, max_len=256)
     body: dict[str, str] = {
@@ -2224,7 +2269,6 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
             if hasattr(self, "ed_login_key") and self.ed_login_key.isVisible()
             else ""
         )
-        hid = _normalize_client_hwid(main_module, self._path)
         if not pilot or not pw or not hid:
             QMessageBox.warning(
                 self,
@@ -2238,6 +2282,7 @@ def _patch_startup_auth_portal_login(main_module: Any) -> None:
         parent_win = getattr(self, "parent_window", None) or self.parent()
         self._platin_fresh_login = True
         _clear_stale_login_identity(main_module, self._path)
+        hid = _normalize_client_hwid(main_module, self._path, force_os=True)
         try:
             r = requests.post(
                 f"{base}/api/v1/auth/login",
@@ -2945,6 +2990,20 @@ def _patch_branding_live_stamp_flood_guard(main_mod: Any) -> None:
             orig_title(self)
         except Exception:
             pass
+        try:
+            em = (
+                main_mod.app_meta_get(main_mod.DB_PATH, "portal_email", "") or ""
+            ).strip()
+            if em and "@" in em and hasattr(self, "setWindowTitle"):
+                airline = (
+                    main_mod.app_meta_get(
+                        main_mod.DB_PATH, "selected_airline_name", ""
+                    )
+                    or ""
+                ).strip() or "Airline"
+                self.setWindowTitle(f"{em} · SkyTycoon Pro – {airline}")
+        except Exception:
+            pass
 
     def _refresh_branding_ui_safe(self: Any) -> None:
         now = time.monotonic()
@@ -2953,6 +3012,10 @@ def _patch_branding_live_stamp_flood_guard(main_mod: Any) -> None:
         self._platin_brand_ui_mono = now
         try:
             orig_brand_ui(self)
+        except Exception:
+            pass
+        try:
+            _platin_apply_cockpit_identity(self, main_mod, main_mod.DB_PATH)
         except Exception:
             pass
 
