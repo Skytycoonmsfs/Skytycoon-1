@@ -15,11 +15,21 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
 Write-Host "[SkyTycoon] GitHub-Login (Account: Skytycoonmsfs wählen) …" -ForegroundColor Cyan
 gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key -s repo,workflow,read:org
 
+$target = "Skytycoonmsfs/Skytycoon"
 $exists = $false
 try {
-    gh repo view Skytycoonmsfs/Skytycoon 2>$null | Out-Null
+    gh repo view $target 2>$null | Out-Null
     $exists = $true
 } catch { }
+
+if (-not $exists) {
+    try {
+        gh repo view Skytycoonmsfs/Skytycoon-1 2>$null | Out-Null
+        Write-Host "[SkyTycoon] Repo heisst noch Skytycoon-1 — umbenennen zu Skytycoon …" -ForegroundColor Cyan
+        gh repo rename Skytycoon --repo Skytycoonmsfs/Skytycoon-1
+        $exists = $true
+    } catch { }
+}
 
 if (-not $exists) {
     Write-Host "[SkyTycoon] Leeres Repo Skytycoonmsfs/Skytycoon anlegen …" -ForegroundColor Cyan
